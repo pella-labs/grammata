@@ -1,0 +1,254 @@
+/**
+ * Reads Claude Code session JSONL files from ~/.claude/projects/
+ * and aggregates token usage, cost, and model data.
+ */
+import { lstat, readdir, readFile } from 'fs/promises';
+import { join } from 'path';
+import { homedir } from 'os';
+import { CLAUDE_PRICING, getClaudePricing } from './pricing.js';
+
+export { CLAUDE_PRICING };
+
+export interface ClaudeSession {
+  sessionId: string;
+  sessionName: string;
+  project: string;
+  firstTimestamp: string;
+  lastTimestamp: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreateTokens: number;
+  costUsd: number;
+  turnCount: number;
+  toolCalls: number;
+  toolBreakdown: Record<string, number>;
+  startHour: number;
+}
+
+export interface ClaudeSummary {
+  sessions: ClaudeSession[];
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreateTokens: number;
+  cacheSavingsUsd: number;
+  toolBreakdown: Record<string, number>;
+  hourDistribution: number[];
+}
+
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+
+interface AssistantMessage {
+  type: string;
+  message: {
+    model?: string;
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
+    content?: Array<{ type?: string; name?: string }>;
+  };
+}
+
+function isAssistantWithUsage(d: unknown): d is AssistantMessage {
+  const obj = d as Record<string, unknown>;
+  return (
+    obj?.type === 'assistant' &&
+    typeof obj?.message === 'object' &&
+    obj.message !== null
+  );
+}
+
+async function parseSessionFile(
+  filePath: string,
+  projectName: string,
+): Promise<ClaudeSession | null> {
+  try {
+    const fileInfo = await lstat(filePath);
+    if (fileInfo.isSymbolicLink()) return null;
+    if (fileInfo.size > MAX_FILE_SIZE) return null;
+
+    const content = await readFile(filePath, 'utf-8');
+    const lines = content.split('\n').filter((l) => l.trim());
+
+    let model = 'unknown';
+    let totalInput = 0;
+    let totalOutput = 0;
+    let cacheRead = 0;
+    let cacheCreate = 0;
+    let turnCount = 0;
+    let toolCalls = 0;
+    const toolBreakdown: Record<string, number> = {};
+    let firstTs = '';
+    let lastTs = '';
+    let sessionName = '';
+
+    for (const line of lines) {
+      try {
+        const d = JSON.parse(line) as Record<string, unknown>;
+
+        if (d.timestamp) {
+          if (!firstTs) firstTs = d.timestamp as string;
+          lastTs = d.timestamp as string;
+        }
+
+        if (!sessionName && d.type === 'queue-operation' && d.content) {
+          const text =
+            typeof d.content === 'string' ? d.content : '';
+          sessionName = text
+            .replace(/^-\n?/, '')
+            .trim()
+            .slice(0, 80);
+        }
+
+        if (isAssistantWithUsage(d)) {
+          const usage = d.message.usage;
+          if (usage) {
+            totalInput += usage.input_tokens || 0;
+            totalOutput += usage.output_tokens || 0;
+            cacheRead += usage.cache_read_input_tokens || 0;
+            cacheCreate += usage.cache_creation_input_tokens || 0;
+            turnCount++;
+          }
+
+          if (d.message.model && d.message.model !== '<synthetic>') {
+            model = d.message.model;
+          }
+
+          if (d.message.content) {
+            for (const c of d.message.content) {
+              if (c && typeof c === 'object' && c.type === 'tool_use') {
+                toolCalls++;
+                const toolName = c.name || 'unknown';
+                toolBreakdown[toolName] =
+                  (toolBreakdown[toolName] || 0) + 1;
+              }
+            }
+          }
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    if (turnCount === 0) return null;
+
+    const pricing = getClaudePricing(model);
+    const costUsd =
+      (totalInput * pricing.input +
+        totalOutput * pricing.output +
+        cacheRead * pricing.cacheRead +
+        cacheCreate * pricing.cacheWrite) /
+      1_000_000;
+
+    const sessionId =
+      filePath.split('/').pop()?.replace('.jsonl', '') || '';
+    const startHour = firstTs ? new Date(firstTs).getHours() : 0;
+
+    return {
+      sessionId,
+      sessionName: sessionName || sessionId.slice(0, 8),
+      project: projectName,
+      firstTimestamp: firstTs,
+      lastTimestamp: lastTs,
+      model,
+      inputTokens: totalInput,
+      outputTokens: totalOutput,
+      cacheReadTokens: cacheRead,
+      cacheCreateTokens: cacheCreate,
+      costUsd,
+      turnCount,
+      toolCalls,
+      toolBreakdown,
+      startHour,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function readClaude(dir?: string): Promise<ClaudeSummary> {
+  const claudeDir = dir || join(homedir(), '.claude', 'projects');
+  const result: ClaudeSummary = {
+    sessions: [],
+    totalCost: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCacheReadTokens: 0,
+    totalCacheCreateTokens: 0,
+    cacheSavingsUsd: 0,
+    toolBreakdown: {},
+    hourDistribution: new Array(24).fill(0) as number[],
+  };
+
+  try {
+    const projects = await readdir(claudeDir);
+    for (const project of projects) {
+      const projectDir = join(claudeDir, project);
+      try {
+        const dirInfo = await lstat(projectDir);
+        if (dirInfo.isSymbolicLink()) continue;
+      } catch {
+        continue;
+      }
+
+      let files: string[];
+      try {
+        files = (await readdir(projectDir)).filter((f) =>
+          f.endsWith('.jsonl'),
+        );
+      } catch {
+        continue;
+      }
+
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < files.length; i += BATCH_SIZE) {
+        const batch = files.slice(i, i + BATCH_SIZE);
+        const sessions = await Promise.all(
+          batch.map((f) =>
+            parseSessionFile(join(projectDir, f), project),
+          ),
+        );
+        for (const session of sessions) {
+          if (session) {
+            result.sessions.push(session);
+            result.totalCost += session.costUsd;
+            result.totalInputTokens += session.inputTokens;
+            result.totalOutputTokens += session.outputTokens;
+            result.totalCacheReadTokens += session.cacheReadTokens;
+            result.totalCacheCreateTokens += session.cacheCreateTokens;
+            for (const [tool, count] of Object.entries(
+              session.toolBreakdown,
+            )) {
+              result.toolBreakdown[tool] =
+                (result.toolBreakdown[tool] || 0) + count;
+            }
+            result.hourDistribution[session.startHour]++;
+          }
+        }
+      }
+    }
+
+    for (const session of result.sessions) {
+      const pricing = getClaudePricing(session.model);
+      const savingsPerToken =
+        (pricing.input - pricing.cacheRead) / 1_000_000;
+      result.cacheSavingsUsd += session.cacheReadTokens * savingsPerToken;
+    }
+
+    result.sessions.sort(
+      (a, b) =>
+        new Date(b.firstTimestamp).getTime() -
+        new Date(a.firstTimestamp).getTime(),
+    );
+  } catch {
+    // Directory doesn't exist or is unreadable
+  }
+
+  return result;
+}

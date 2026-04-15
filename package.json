@@ -1,0 +1,52 @@
+{
+  "name": "grammata",
+  "version": "0.1.8",
+  "description": "Read and aggregate coding agent usage data from Claude Code (~/.claude) and Codex (~/.codex)",
+  "author": "Pella Labs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pella-labs/pharos.git"
+  },
+  "homepage": "https://github.com/pella-labs/pharos/tree/main/packages/analytics-engine",
+  "engines": {
+    "node": ">=18"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "grammata": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "cli": "tsx src/cli.ts"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "analytics",
+    "usage",
+    "tokens",
+    "cost"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
+  }
+}
