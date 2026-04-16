@@ -1,7 +1,7 @@
 {
   "name": "grammata",
-  "version": "0.1.8",
-  "description": "Read and aggregate coding agent usage data from Claude Code (~/.claude) and Codex (~/.codex)",
+  "version": "0.2.1",
+  "description": "Read and aggregate coding agent usage data from Claude Code (~/.claude), Codex (~/.codex), and Cursor",
   "author": "Pella Labs",
   "repository": {
     "type": "git",
@@ -37,6 +37,7 @@
   "keywords": [
     "claude-code",
     "codex",
+    "cursor",
     "analytics",
     "usage",
     "tokens",

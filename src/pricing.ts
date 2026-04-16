@@ -59,3 +59,52 @@ export function getCodexPricing(model: string): CodexModelPricing {
   }
   return { input: 1.75, output: 14, cachedInput: 0.175 };
 }
+
+// Cursor models — Cursor proxies various providers (Anthropic, OpenAI, Google).
+// Pricing matches the underlying model; we map known Cursor model names here.
+
+export interface CursorModelPricing {
+  input: number;
+  output: number;
+}
+
+export const CURSOR_PRICING: Record<string, CursorModelPricing> = {
+  // Anthropic models via Cursor
+  'claude-3.5-sonnet': { input: 3, output: 15 },
+  'claude-3-5-sonnet-20241022': { input: 3, output: 15 },
+  'claude-sonnet-4-20250514': { input: 3, output: 15 },
+  'claude-3-opus': { input: 15, output: 75 },
+  'claude-3-haiku': { input: 0.25, output: 1.25 },
+  // OpenAI models via Cursor
+  'gpt-4': { input: 30, output: 60 },
+  'gpt-4o': { input: 2.5, output: 10 },
+  'gpt-4o-mini': { input: 0.15, output: 0.6 },
+  'gpt-4-turbo': { input: 10, output: 30 },
+  o3: { input: 10, output: 40 },
+  'o3-mini': { input: 1.1, output: 4.4 },
+  // Google models via Cursor
+  'gemini-pro': { input: 0.5, output: 1.5 },
+  'gemini-1.5-pro': { input: 3.5, output: 10.5 },
+  // Cursor's own fine-tuned models
+  'cursor-small': { input: 0.5, output: 1.5 },
+  'cursor-fast': { input: 0.5, output: 1.5 },
+};
+
+export function getCursorPricing(model: string): CursorModelPricing {
+  if (CURSOR_PRICING[model]) return CURSOR_PRICING[model];
+  // Try prefix matching for versioned model names
+  for (const [key, pricing] of Object.entries(CURSOR_PRICING)) {
+    if (model.includes(key) || key.includes(model)) return pricing;
+  }
+  // Also check if it's a Claude or GPT model we already know about
+  if (model.includes('claude')) {
+    const cp = getClaudePricing(model);
+    return { input: cp.input, output: cp.output };
+  }
+  if (model.includes('gpt') || model.includes('o3') || model.includes('o4')) {
+    const cp = getCodexPricing(model);
+    return { input: cp.input, output: cp.output };
+  }
+  // Default: mid-range pricing
+  return { input: 3, output: 15 };
+}

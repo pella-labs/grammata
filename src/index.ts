@@ -19,13 +19,17 @@ export { readClaude } from './claude.js';
 export type { ClaudeSession, ClaudeSummary } from './claude.js';
 export { readCodex } from './codex.js';
 export type { CodexSession, CodexSummary } from './codex.js';
+export { readCursor } from './cursor.js';
+export type { CursorSession, CursorSummary } from './cursor.js';
 export {
   CLAUDE_PRICING,
   CODEX_PRICING,
+  CURSOR_PRICING,
   getClaudePricing,
   getCodexPricing,
+  getCursorPricing,
 } from './pricing.js';
-export type { ModelPricing, CodexModelPricing } from './pricing.js';
+export type { ModelPricing, CodexModelPricing, CursorModelPricing } from './pricing.js';
 export { formatTokens, formatCost, formatDuration } from './format.js';
 
 type ActivityCategory =
@@ -104,6 +108,28 @@ export interface UsageSummary {
     totalReasoningBlocks: number;
     totalWebSearches: number;
   };
+  cursor: {
+    sessions: number;
+    cost: number;
+    inputTokens: number;
+    outputTokens: number;
+    models: Record<string, { sessions: number; cost: number }>;
+    topTools: Array<{ name: string; count: number }>;
+    totalToolCalls: number;
+    activeDays: number;
+    projects: Array<{ name: string; sessions: number }>;
+    totalMessages: number;
+    totalLinesAdded: number;
+    totalLinesRemoved: number;
+    totalFilesCreated: number;
+    thinkingTimeMs: number;
+    turnTimeMs: number;
+    dailyActivity: Array<{ date: string; messages: number; toolCalls: number }>;
+    totalTabSuggestedLines: number;
+    totalTabAcceptedLines: number;
+    totalComposerSuggestedLines: number;
+    totalComposerAcceptedLines: number;
+  };
   combined: {
     totalCost: number;
     totalSessions: number;
@@ -116,6 +142,7 @@ export interface UsageSummary {
       cost: number;
       claudeSessions: number;
       codexSessions: number;
+      cursorSessions: number;
     }>;
   };
   highlights: {
@@ -161,9 +188,10 @@ export interface UsageSummary {
 }
 
 export async function readAll(): Promise<UsageSummary> {
-  const [claude, codex] = await Promise.all([
+  const [claude, codex, cursor] = await Promise.all([
     (await import('./claude.js')).readClaude(),
     (await import('./codex.js')).readCodex(),
+    (await import('./cursor.js')).readCursor(),
   ]);
 
   // Claude model breakdown
@@ -181,11 +209,20 @@ export async function readAll(): Promise<UsageSummary> {
     claude.sessions.map((s) => s.firstTimestamp.slice(0, 10)),
   );
 
-  // Claude top tools
+  // Claude top tools (used for Claude-specific display)
   const topTools = Object.entries(claude.toolBreakdown)
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 20);
+
+  // All tools merged across all providers
+  const allToolBreakdown: Record<string, number> = { ...claude.toolBreakdown };
+  for (const [tool, count] of Object.entries(codex.toolBreakdown)) {
+    allToolBreakdown[tool] = (allToolBreakdown[tool] || 0) + count;
+  }
+  for (const [tool, count] of Object.entries(cursor.toolBreakdown)) {
+    allToolBreakdown[tool] = (allToolBreakdown[tool] || 0) + count;
+  }
 
   // Codex model breakdown
   const codexModels: Record<string, { sessions: number; cost: number }> =
@@ -200,6 +237,13 @@ export async function readAll(): Promise<UsageSummary> {
   // Codex active days
   const codexDays = new Set(
     codex.sessions.map((s) => s.createdAt.slice(0, 10)),
+  );
+
+  // Cursor active days
+  const cursorDays = new Set(
+    cursor.sessions
+      .filter((s) => s.createdAt)
+      .map((s) => s.createdAt.slice(0, 10)),
   );
 
   // Claude projects
@@ -232,14 +276,19 @@ export async function readAll(): Promise<UsageSummary> {
     codexProjects.set(s.project, e);
   }
 
-  // Total tool calls
-  const totalToolCalls = Object.values(claude.toolBreakdown).reduce(
+  // Total tool calls (all providers)
+  const claudeToolCalls = Object.values(claude.toolBreakdown).reduce(
     (s, c) => s + c,
     0,
   );
+  const codexToolCalls = Object.values(codex.toolBreakdown).reduce(
+    (s, c) => s + c,
+    0,
+  );
+  const totalToolCalls = claudeToolCalls + codexToolCalls + cursor.totalToolCalls;
 
   // All active days combined (for streak calc)
-  const allDays = new Set([...claudeDays, ...codexDays]);
+  const allDays = new Set([...claudeDays, ...codexDays, ...cursorDays]);
   const totalActiveDays = allDays.size;
 
   // Longest streak
@@ -291,6 +340,12 @@ export async function readAll(): Promise<UsageSummary> {
     e.cost += info.cost;
     allModels[m] = e;
   }
+  for (const [m, info] of Object.entries(cursor.models)) {
+    const e = allModels[m] || { sessions: 0, cost: 0 };
+    e.sessions += info.sessions;
+    e.cost += info.cost;
+    allModels[m] = e;
+  }
   const favoriteModel =
     Object.entries(allModels).sort(
       (a, b) => b[1].cost - a[1].cost,
@@ -309,16 +364,20 @@ export async function readAll(): Promise<UsageSummary> {
 
   const personality = `${timeType} / ${archetype}`;
 
-  // Favorite tool
-  const favoriteTool = topTools[0]?.name || '';
+  // Favorite tool (across all providers)
+  const favoriteTool =
+    Object.entries(allToolBreakdown).sort(
+      (a, b) => b[1] - a[1],
+    )[0]?.[0] || '';
 
-  // Cache hit rate
+  // Cache hit rate (Cursor doesn't expose cache tokens)
   const totalCacheReads =
     claude.totalCacheReadTokens + codex.totalCachedInputTokens;
   const totalAllInput =
     claude.totalInputTokens +
     claude.totalCacheReadTokens +
-    codex.totalInputTokens;
+    codex.totalInputTokens +
+    cursor.totalInputTokens;
   const cacheHitRate =
     totalAllInput > 0
       ? Math.round((totalCacheReads / totalAllInput) * 100)
@@ -351,12 +410,22 @@ export async function readAll(): Promise<UsageSummary> {
       };
     }
   }
+  for (const s of cursor.sessions) {
+    if (!mostExpensiveSession || s.costUsd > mostExpensiveSession.cost) {
+      mostExpensiveSession = {
+        cost: s.costUsd,
+        model: s.model,
+        project: 'cursor',
+        date: (s.createdAt || '').slice(0, 10),
+      };
+    }
+  }
 
   const totalSessions =
-    claude.sessions.length + codex.sessions.length;
+    claude.sessions.length + codex.sessions.length + cursor.sessions.length;
   const avgCostPerSession =
     totalSessions > 0
-      ? (claude.totalCost + codex.totalCost) / totalSessions
+      ? (claude.totalCost + codex.totalCost + cursor.totalCost) / totalSessions
       : 0;
   const avgSessionsPerDay =
     totalActiveDays > 0 ? totalSessions / totalActiveDays : 0;
@@ -403,13 +472,50 @@ export async function readAll(): Promise<UsageSummary> {
       totalReasoningBlocks: codex.totalReasoningBlocks,
       totalWebSearches: codex.totalWebSearches,
     },
+    cursor: {
+      sessions: cursor.sessions.length,
+      cost: cursor.totalCost,
+      inputTokens: cursor.totalInputTokens,
+      outputTokens: cursor.totalOutputTokens,
+      models: cursor.models,
+      topTools: Object.entries(cursor.toolBreakdown)
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20),
+      totalToolCalls: cursor.totalToolCalls,
+      activeDays: cursorDays.size,
+      projects: (() => {
+        const projects = new Map<string, { sessions: number }>();
+        for (const s of cursor.sessions) {
+          if (!s.project) continue;
+          const e = projects.get(s.project) || { sessions: 0 };
+          e.sessions++;
+          projects.set(s.project, e);
+        }
+        return [...projects.entries()]
+          .map(([name, v]) => ({ name, ...v }))
+          .sort((a, b) => b.sessions - a.sessions)
+          .slice(0, 20);
+      })(),
+      totalMessages: cursor.totalMessages,
+      totalLinesAdded: cursor.totalLinesAdded,
+      totalLinesRemoved: cursor.totalLinesRemoved,
+      totalFilesCreated: cursor.totalFilesCreated,
+      thinkingTimeMs: cursor.thinkingTimeMs,
+      turnTimeMs: cursor.turnTimeMs,
+      dailyActivity: cursor.dailyActivity,
+      totalTabSuggestedLines: cursor.totalTabSuggestedLines,
+      totalTabAcceptedLines: cursor.totalTabAcceptedLines,
+      totalComposerSuggestedLines: cursor.totalComposerSuggestedLines,
+      totalComposerAcceptedLines: cursor.totalComposerAcceptedLines,
+    },
     combined: {
-      totalCost: claude.totalCost + codex.totalCost,
+      totalCost: claude.totalCost + codex.totalCost + cursor.totalCost,
       totalSessions,
       totalInputTokens:
-        claude.totalInputTokens + codex.totalInputTokens,
+        claude.totalInputTokens + codex.totalInputTokens + cursor.totalInputTokens,
       totalOutputTokens:
-        claude.totalOutputTokens + codex.totalOutputTokens,
+        claude.totalOutputTokens + codex.totalOutputTokens + cursor.totalOutputTokens,
       totalActiveDays,
       dailyDistribution: (() => {
         const days = new Map<
@@ -419,6 +525,7 @@ export async function readAll(): Promise<UsageSummary> {
             cost: number;
             claudeSessions: number;
             codexSessions: number;
+            cursorSessions: number;
           }
         >();
         for (const s of claude.sessions) {
@@ -429,6 +536,7 @@ export async function readAll(): Promise<UsageSummary> {
             cost: 0,
             claudeSessions: 0,
             codexSessions: 0,
+            cursorSessions: 0,
           };
           e.sessions++;
           e.cost += s.costUsd;
@@ -443,10 +551,26 @@ export async function readAll(): Promise<UsageSummary> {
             cost: 0,
             claudeSessions: 0,
             codexSessions: 0,
+            cursorSessions: 0,
           };
           e.sessions++;
           e.cost += s.costUsd;
           e.codexSessions++;
+          days.set(date, e);
+        }
+        for (const s of cursor.sessions) {
+          const date = (s.createdAt || '').slice(0, 10);
+          if (!date) continue;
+          const e = days.get(date) || {
+            sessions: 0,
+            cost: 0,
+            claudeSessions: 0,
+            codexSessions: 0,
+            cursorSessions: 0,
+          };
+          e.sessions++;
+          e.cost += s.costUsd;
+          e.cursorSessions++;
           days.set(date, e);
         }
         return [...days.entries()]
@@ -521,7 +645,7 @@ export async function readAll(): Promise<UsageSummary> {
         return { reads, writes, ratio };
       })(),
       costWithoutCache:
-        claude.totalCost + claude.cacheSavingsUsd + codex.totalCost,
+        claude.totalCost + claude.cacheSavingsUsd + codex.totalCost + cursor.totalCost,
       activityCategories: (() => {
         const cats = new Map<
           string,
@@ -556,6 +680,32 @@ export async function readAll(): Promise<UsageSummary> {
           const e = cats.get(cat) || { sessions: 0, cost: 0 };
           e.sessions++;
           e.cost += s.costUsd;
+          cats.set(cat, e);
+        }
+
+        // Cursor sessions: map cursor tools to normalized names
+        // We use the global tool breakdown since Cursor doesn't have per-session tools
+        if (cursor.sessions.length > 0 && cursor.totalToolCalls > 0) {
+          const cursorMapped: Record<string, number> = {};
+          for (const [tool, count] of Object.entries(cursor.toolBreakdown)) {
+            if (tool === 'read_file_v2' || tool === 'read_lints')
+              cursorMapped['Read'] = (cursorMapped['Read'] || 0) + count;
+            else if (tool === 'edit_file_v2')
+              cursorMapped['Edit'] = (cursorMapped['Edit'] || 0) + count;
+            else if (tool === 'run_terminal_command_v2')
+              cursorMapped['Bash'] = (cursorMapped['Bash'] || 0) + count;
+            else if (tool === 'ripgrep_raw_search' || tool === 'semantic_search_full')
+              cursorMapped['Grep'] = (cursorMapped['Grep'] || 0) + count;
+            else if (tool === 'glob_file_search')
+              cursorMapped['Glob'] = (cursorMapped['Glob'] || 0) + count;
+            else if (tool === 'delete_file')
+              cursorMapped['Write'] = (cursorMapped['Write'] || 0) + count;
+            else cursorMapped[tool] = (cursorMapped[tool] || 0) + count;
+          }
+          // Classify entire Cursor usage as one aggregate entry
+          const cat = classifySession(cursorMapped);
+          const e = cats.get(cat) || { sessions: 0, cost: 0 };
+          e.sessions += cursor.sessions.length;
           cats.set(cat, e);
         }
 
