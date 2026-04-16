@@ -4,6 +4,7 @@ import {
   readCodex,
   readCursor,
   readAll,
+  analyze,
   formatCost,
   formatTokens,
   formatDuration,
@@ -171,6 +172,8 @@ const COMMANDS = new Set([
   'cost',
   'daily',
   'hours',
+  'analytics',
+  'a',
   'pharos',
   'help',
 ]);
@@ -242,6 +245,7 @@ function printHelp(): void {
     cost             Cost summary
     daily            Daily cost breakdown
     hours            Activity by hour of day
+    analytics        Full dashboard (retry, branches, velocity, cache)
     pharos           Generate a shareable stats card
 
   OPTIONS
@@ -262,6 +266,8 @@ function printHelp(): void {
     grammata tools              # tool usage ranking
     grammata daily              # day-by-day costs
     grammata hours              # activity heatmap by hour
+    grammata analytics          # full dashboard output
+    grammata analytics --json   # dashboard as JSON
     grammata pharos --token <token>  # generate shareable stats card
 `);
 }
@@ -1475,6 +1481,107 @@ async function cmdHours(): Promise<void> {
   console.log('');
 }
 
+async function cmdAnalytics(): Promise<void> {
+  const data = await analyze();
+
+  if (jsonMode) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+
+  const fmtPct = (n: number) => (n * 100).toFixed(1) + '%';
+  const hourLabel = (h: number) =>
+    h === 0 ? '12 AM' : h < 12 ? `${h} AM` : h === 12 ? '12 PM' : `${h - 12} PM`;
+
+  console.log('');
+  console.log('  grammata analytics');
+  console.log('  \u2500'.repeat(40));
+  console.log('');
+
+  console.log(`  Sessions:        ${data.totalSessions}`);
+  console.log(`  Total cost:      ${formatCost(data.totalCost)}`);
+  console.log(`  Cache savings:   ${formatCost(data.cacheSavingsUsd)}`);
+  console.log(
+    `  Input tokens:    ${formatTokens(data.totalInputTokens)}   Output: ${formatTokens(data.totalOutputTokens)}`,
+  );
+  console.log('');
+
+  console.log(`  Week over week:  ${data.costTrend.changePercent.toFixed(1)}%`);
+  console.log(
+    `    current week:  ${formatCost(data.costTrend.currentWeekCost)}   prev: ${formatCost(data.costTrend.previousWeekCost)}`,
+  );
+  console.log('');
+
+  console.log('  Sources');
+  for (const [src, stat] of Object.entries(data.sourceStats)) {
+    if (stat.sessions === 0) continue;
+    console.log(
+      `    ${src.padEnd(14)} ${String(stat.sessions).padStart(5)} sessions   ${formatCost(stat.cost)}`,
+    );
+  }
+  console.log('');
+
+  if (data.categoryBreakdowns.length > 0) {
+    console.log('  Activity');
+    for (const c of data.categoryBreakdowns) {
+      console.log(
+        `    ${c.category.padEnd(14)} ${String(c.sessions).padStart(5)} sessions   ${formatCost(c.cost)}`,
+      );
+    }
+    console.log('');
+  }
+
+  const r = data.retryStats;
+  if (r.totalEditTurns > 0) {
+    console.log('  Retry stats');
+    console.log(`    First-try rate:  ${fmtPct(r.firstTryRate)}`);
+    console.log(
+      `    Edit turns:      ${r.totalEditTurns}   retried: ${r.retriedTurns}`,
+    );
+    console.log(`    Retry cost:      ${formatCost(r.retryCostUsd)}`);
+    if (r.mostRetriedTool) console.log(`    Most-retried tool: ${r.mostRetriedTool}`);
+    if (r.mostRetriedFile) console.log(`    Most-retried file: ${r.mostRetriedFile}`);
+    console.log('');
+  }
+
+  if (data.branchCosts.length > 0) {
+    console.log('  Branches (top 5 by cost)');
+    for (const b of data.branchCosts.slice(0, 5)) {
+      console.log(
+        `    ${(b.project + '@' + b.branch).padEnd(40)} ${formatCost(b.cost)}   ${b.sessions} sessions`,
+      );
+    }
+    console.log('');
+  }
+
+  console.log('  Cache');
+  console.log(`    Hit rate:        ${fmtPct(data.cacheStats.hitRate)}`);
+  console.log(`    Cache read:      ${formatTokens(data.cacheStats.totalCacheRead)}`);
+  console.log(`    Cache write:     ${formatTokens(data.cacheStats.cacheWriteTokens)}`);
+  console.log('');
+
+  if (data.costVelocity.length > 0) {
+    const recent = data.costVelocity.slice(-7);
+    console.log('  Velocity (last 7 days)');
+    for (const v of recent) {
+      console.log(
+        `    ${v.date}   ${formatCost(v.cost).padStart(8)}   ${v.hours.toFixed(1)}h   ${formatCost(v.costPerHour)}/hr`,
+      );
+    }
+    console.log('');
+  }
+
+  console.log(`  Peak hour:       ${hourLabel(data.peakHour)}`);
+  console.log(`  Favorite model:  ${data.favoriteModel}`);
+  console.log(`  Favorite tool:   ${data.favoriteTool}`);
+  if (data.mostExpensiveSession) {
+    console.log(
+      `  Priciest session: ${formatCost(data.mostExpensiveSession.cost)} \u2014 ${data.mostExpensiveSession.project} (${data.mostExpensiveSession.model})`,
+    );
+  }
+  console.log('');
+}
+
 async function cmdPharos(): Promise<void> {
   const token = getFlag('token');
   const apiUrl =
@@ -1582,6 +1689,9 @@ async function run(): Promise<void> {
       return cmdDaily();
     case 'hours':
       return cmdHours();
+    case 'analytics':
+    case 'a':
+      return cmdAnalytics();
     case 'pharos':
       return cmdPharos();
     case 'help':

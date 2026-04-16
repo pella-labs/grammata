@@ -3,7 +3,7 @@
  * computations Pharos's dashboard performs, extracted so any consumer
  * can reuse them without rebuilding the aggregation logic.
  */
-import type { UnifiedSession } from './merge.js';
+import type { MergedUsage, SourceStats, SourceType, UnifiedSession } from './merge.js';
 
 export type ActivityCategory =
   | 'Building'
@@ -255,5 +255,174 @@ export function computeRetryStats(sessions: UnifiedSession[]): RetryStats {
     mostRetriedTool,
     mostRetriedFile,
     worstSession,
+  };
+}
+
+export interface DailyCost {
+  date: string;
+  cost: number;
+  tokens: number;
+  sessions: number;
+}
+
+export interface ModelBreakdown {
+  model: string;
+  provider: string;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+  sessionCount: number;
+}
+
+export interface ProjectBreakdown {
+  project: string;
+  displayName: string;
+  cost: number;
+  sessions: number;
+  tokens: number;
+  sources: SourceType[];
+}
+
+export interface CategoryBreakdown {
+  category: ActivityCategory;
+  sessions: number;
+  cost: number;
+}
+
+export interface ToolUsage {
+  name: string;
+  count: number;
+}
+
+export interface AnalyticsData {
+  totalSessions: number;
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  cacheSavingsUsd: number;
+  totalCacheReadTokens: number;
+  costTrend: CostTrend;
+
+  dailyCosts: DailyCost[];
+  modelBreakdowns: ModelBreakdown[];
+  sessionRows: UnifiedSession[];
+  toolUsage: ToolUsage[];
+  projectBreakdowns: ProjectBreakdown[];
+  categoryBreakdowns: CategoryBreakdown[];
+  hourDistribution: number[];
+
+  branchCosts: BranchCost[];
+  cacheStats: CacheStats;
+  costVelocity: CostVelocityPoint[];
+  retryStats: RetryStats;
+
+  sourceStats: Record<SourceType, SourceStats>;
+  providerStats: Record<string, SourceStats>;
+
+  peakHour: number;
+  mostExpensiveSession: UnifiedSession | null;
+  favoriteModel: string;
+  favoriteTool: string;
+}
+
+/**
+ * One-shot aggregator: takes a merged session set and returns every
+ * metric the Pharos dashboard renders, computed in a single pass.
+ */
+export function buildAnalytics(merged: MergedUsage): AnalyticsData {
+  const dailyMap = new Map<string, DailyCost>();
+  const modelMap = new Map<string, ModelBreakdown>();
+  const projectMap = new Map<string, ProjectBreakdown>();
+  const categoryMap = new Map<ActivityCategory, CategoryBreakdown>();
+
+  for (const session of merged.sessions) {
+    const dk = dateKey(session.date);
+    const day = dailyMap.get(dk) || { date: dk, cost: 0, tokens: 0, sessions: 0 };
+    day.cost += session.cost;
+    day.tokens += session.totalTokens;
+    day.sessions += 1;
+    dailyMap.set(dk, day);
+
+    const modelKey = `${session.provider}/${session.model}`;
+    const me = modelMap.get(modelKey) || {
+      model: session.model,
+      provider: session.provider,
+      inputTokens: 0,
+      outputTokens: 0,
+      cost: 0,
+      sessionCount: 0,
+    };
+    me.inputTokens += session.inputTokens;
+    me.outputTokens += session.outputTokens;
+    me.cost += session.cost;
+    me.sessionCount += 1;
+    modelMap.set(modelKey, me);
+
+    const proj = projectMap.get(session.project) || {
+      project: session.project,
+      displayName: session.project,
+      cost: 0,
+      sessions: 0,
+      tokens: 0,
+      sources: [] as SourceType[],
+    };
+    proj.cost += session.cost;
+    proj.sessions += 1;
+    proj.tokens += session.totalTokens;
+    if (!proj.sources.includes(session.source)) proj.sources.push(session.source);
+    projectMap.set(session.project, proj);
+
+    const cat = classifySession(session.toolBreakdown);
+    const catEntry = categoryMap.get(cat) || { category: cat, sessions: 0, cost: 0 };
+    catEntry.sessions += 1;
+    catEntry.cost += session.cost;
+    categoryMap.set(cat, catEntry);
+  }
+
+  const dailyCosts = Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+  const modelBreakdowns = Array.from(modelMap.values()).sort((a, b) => b.cost - a.cost);
+  const projectBreakdowns = Array.from(projectMap.values()).sort((a, b) => b.cost - a.cost);
+  const categoryBreakdowns = Array.from(categoryMap.values()).sort((a, b) => b.sessions - a.sessions);
+
+  const toolUsage: ToolUsage[] = Object.entries(merged.toolBreakdown)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const totalInputTokens = merged.sessions.reduce((s, x) => s + x.inputTokens, 0);
+  const totalOutputTokens = merged.sessions.reduce((s, x) => s + x.outputTokens, 0);
+
+  const peakHour = merged.hourDistribution.indexOf(Math.max(...merged.hourDistribution));
+  const mostExpensiveSession =
+    merged.sessions.length > 0
+      ? merged.sessions.reduce((max, s) => (s.cost > max.cost ? s : max), merged.sessions[0])
+      : null;
+  const favoriteModel = modelBreakdowns.length > 0 ? modelBreakdowns[0].model : '';
+  const favoriteTool = toolUsage.length > 0 ? toolUsage[0].name : '';
+
+  return {
+    totalSessions: merged.sessions.length,
+    totalCost: merged.totalCost,
+    totalInputTokens,
+    totalOutputTokens,
+    cacheSavingsUsd: merged.cacheSavingsUsd,
+    totalCacheReadTokens: merged.totalCacheReadTokens,
+    costTrend: computeCostTrend(merged.sessions),
+    dailyCosts,
+    modelBreakdowns,
+    sessionRows: merged.sessions,
+    toolUsage,
+    projectBreakdowns,
+    categoryBreakdowns,
+    hourDistribution: merged.hourDistribution,
+    branchCosts: computeBranchCosts(merged.sessions),
+    cacheStats: computeCacheStats(merged.sessions, merged.cacheSavingsUsd),
+    costVelocity: computeCostVelocity(merged.sessions),
+    retryStats: computeRetryStats(merged.sessions),
+    sourceStats: merged.sourceStats,
+    providerStats: merged.providerStats,
+    peakHour: peakHour < 0 ? 0 : peakHour,
+    mostExpensiveSession,
+    favoriteModel,
+    favoriteTool,
   };
 }

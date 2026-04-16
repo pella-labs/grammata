@@ -39,6 +39,7 @@ export {
   computeCacheStats,
   computeCostVelocity,
   computeRetryStats,
+  buildAnalytics,
 } from './analytics.js';
 export type {
   ActivityCategory,
@@ -47,6 +48,12 @@ export type {
   CacheStats,
   CostVelocityPoint,
   RetryStats,
+  DailyCost,
+  ModelBreakdown,
+  ProjectBreakdown,
+  CategoryBreakdown,
+  ToolUsage,
+  AnalyticsData,
 } from './analytics.js';
 export {
   CLAUDE_PRICING,
@@ -59,7 +66,26 @@ export {
 export type { ModelPricing, CodexModelPricing, CursorModelPricing } from './pricing.js';
 export { formatTokens, formatCost, formatDuration } from './format.js';
 
-import { classifySession, type ActivityCategory } from './analytics.js';
+import { buildAnalytics, classifySession, type ActivityCategory, type AnalyticsData } from './analytics.js';
+import { mergeAll } from './merge.js';
+
+/**
+ * One-call pipeline: read every supported source, merge into a unified
+ * session array, and compute the full analytics object in one go.
+ *
+ *   import { analyze } from 'grammata';
+ *   const data = await analyze();
+ *   console.log(data.totalCost, data.retryStats.firstTryRate);
+ */
+export async function analyze(): Promise<AnalyticsData> {
+  const [claude, codex, cursor, goose] = await Promise.all([
+    (await import('./claude.js')).readClaude(),
+    (await import('./codex.js')).readCodex(),
+    (await import('./cursor.js')).readCursor(),
+    (await import('./goose.js')).readGoose(),
+  ]);
+  return buildAnalytics(mergeAll(claude, codex, cursor, goose));
+}
 
 const CATEGORY_DESCRIPTIONS: Record<ActivityCategory, string> = {
   Building: 'High Edit + Write activity — creating new code',
