@@ -25,6 +25,15 @@ export interface ClaudeSession {
   toolCalls: number;
   toolBreakdown: Record<string, number>;
   startHour: number;
+  gitBranch: string;
+  prLinks: string[];
+  version: string;
+  entrypoint: string;
+  // Retry detection — a file edited more than once in a session counts as (edits - 1) retries.
+  retryCount: number;
+  totalEditTurns: number;
+  mostRetriedFile: string | null;
+  perToolCounts: Record<string, { total: number; retried: number }>;
 }
 
 export interface ClaudeSummary {
@@ -41,6 +50,12 @@ export interface ClaudeSummary {
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 
+interface ToolUseBlock {
+  type?: string;
+  name?: string;
+  input?: { file_path?: string };
+}
+
 interface AssistantMessage {
   type: string;
   message: {
@@ -51,7 +66,7 @@ interface AssistantMessage {
       cache_read_input_tokens?: number;
       cache_creation_input_tokens?: number;
     };
-    content?: Array<{ type?: string; name?: string }>;
+    content?: ToolUseBlock[];
   };
 }
 
@@ -84,9 +99,14 @@ async function parseSessionFile(
     let turnCount = 0;
     let toolCalls = 0;
     const toolBreakdown: Record<string, number> = {};
+    const editsByToolAndFile: Record<string, Record<string, number>> = {};
     let firstTs = '';
     let lastTs = '';
     let sessionName = '';
+    let gitBranch = '';
+    const prLinks: string[] = [];
+    let version = '';
+    let entrypoint = '';
 
     for (const line of lines) {
       try {
@@ -104,6 +124,14 @@ async function parseSessionFile(
             .replace(/^-\n?/, '')
             .trim()
             .slice(0, 80);
+        }
+
+        if (typeof d.gitBranch === 'string' && !gitBranch) gitBranch = d.gitBranch;
+        if (typeof d.version === 'string' && !version) version = d.version;
+        if (typeof d.entrypoint === 'string' && !entrypoint) entrypoint = d.entrypoint;
+
+        if (d.type === 'pr-link' && typeof d.prUrl === 'string' && !prLinks.includes(d.prUrl)) {
+          prLinks.push(d.prUrl);
         }
 
         if (isAssistantWithUsage(d)) {
@@ -127,6 +155,14 @@ async function parseSessionFile(
                 const toolName = c.name || 'unknown';
                 toolBreakdown[toolName] =
                   (toolBreakdown[toolName] || 0) + 1;
+                if (toolName === 'Edit' || toolName === 'Write' || toolName === 'MultiEdit') {
+                  const filePath = c.input?.file_path;
+                  if (filePath) {
+                    const byFile = editsByToolAndFile[toolName] || {};
+                    byFile[filePath] = (byFile[filePath] || 0) + 1;
+                    editsByToolAndFile[toolName] = byFile;
+                  }
+                }
               }
             }
           }
@@ -150,6 +186,30 @@ async function parseSessionFile(
       filePath.split('/').pop()?.replace('.jsonl', '') || '';
     const startHour = firstTs ? new Date(firstTs).getHours() : 0;
 
+    let retryCount = 0;
+    let totalEditTurns = 0;
+    let mostRetriedFile: string | null = null;
+    let mostRetriedFileRetries = 0;
+    const perToolCounts: Record<string, { total: number; retried: number }> = {};
+    for (const [tool, fileMap] of Object.entries(editsByToolAndFile)) {
+      let total = 0;
+      let retried = 0;
+      for (const [file, count] of Object.entries(fileMap)) {
+        total += count;
+        if (count > 1) {
+          const fileRetries = count - 1;
+          retried += fileRetries;
+          if (fileRetries > mostRetriedFileRetries) {
+            mostRetriedFileRetries = fileRetries;
+            mostRetriedFile = file;
+          }
+        }
+      }
+      perToolCounts[tool] = { total, retried };
+      totalEditTurns += total;
+      retryCount += retried;
+    }
+
     return {
       sessionId,
       sessionName: sessionName || sessionId.slice(0, 8),
@@ -166,6 +226,14 @@ async function parseSessionFile(
       toolCalls,
       toolBreakdown,
       startHour,
+      gitBranch,
+      prLinks,
+      version,
+      entrypoint,
+      retryCount,
+      totalEditTurns,
+      mostRetriedFile,
+      perToolCounts,
     };
   } catch {
     return null;

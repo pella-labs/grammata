@@ -19,6 +19,7 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024;
 export interface CodexSession {
   sessionId: string;
   sessionName: string;
+  firstMessage: string;
   project: string;
   model: string;
   modelProvider: string;
@@ -31,6 +32,7 @@ export interface CodexSession {
   durationMs: number;
   source: string;
   gitBranch: string;
+  approvalMode: string;
   toolBreakdown: Record<string, number>;
   reasoningBlocks: number;
   messageCount: number;
@@ -55,6 +57,7 @@ interface ThreadMetaEntry {
   cwd: string;
   source: string;
   gitBranch: string;
+  approvalMode: string;
 }
 
 interface ThreadRow {
@@ -64,6 +67,7 @@ interface ThreadRow {
   cwd?: string;
   source?: string;
   git_branch?: string;
+  approval_mode?: string;
 }
 
 interface ParsedSessionData {
@@ -111,7 +115,7 @@ async function loadThreadMeta(
         dbPath,
         `SELECT id, substr(title, 1, 100) as title,
               substr(first_user_message, 1, 200) as first_user_message,
-              substr(cwd, 1, 300) as cwd, source, git_branch
+              substr(cwd, 1, 300) as cwd, source, git_branch, approval_mode
        FROM threads`,
       ],
       { encoding: 'utf-8', timeout: 15000 },
@@ -124,6 +128,7 @@ async function loadThreadMeta(
         cwd: row.cwd || '',
         source: row.source || 'cli',
         gitBranch: row.git_branch || '',
+        approvalMode: row.approval_mode || '',
       });
     }
   } catch {
@@ -344,6 +349,7 @@ export async function readCodex(dir?: string): Promise<CodexSummary> {
             meta?.firstMessage?.slice(0, 80) ||
             sess.sessionId?.slice(0, 8) ||
             '',
+          firstMessage: meta?.firstMessage || '',
           project: projectName(meta?.cwd || sess.cwd || ''),
           model: sess.model,
           modelProvider: 'openai',
@@ -356,6 +362,7 @@ export async function readCodex(dir?: string): Promise<CodexSummary> {
           durationMs: Math.max(durationMs, 0),
           source: meta?.source || sess.source || 'cli',
           gitBranch: meta?.gitBranch || '',
+          approvalMode: meta?.approvalMode || '',
           toolBreakdown: sess.toolBreakdown,
           reasoningBlocks: sess.reasoningBlocks,
           messageCount: sess.messageCount,

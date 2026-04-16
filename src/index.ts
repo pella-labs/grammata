@@ -6,13 +6,20 @@
  * Supports:
  * - Claude Code (~/.claude/projects/) — JSONL session files
  * - Codex (~/.codex/sessions/) — JSONL rollout files + SQLite metadata
+ * - Cursor (state.vscdb) — SQLite composer + bubble + tab stats
+ * - Goose (~/.local/share/goose/sessions/sessions.db) — any-provider sessions
  *
  * Usage:
- *   import { readClaude, readCodex, readAll } from 'grammata';
+ *   import { readClaude, readCodex, readCursor, readGoose, readAll } from 'grammata';
  *
  *   const claude = await readClaude();
  *   const codex  = await readCodex();
+ *   const goose  = await readGoose();
  *   const all    = await readAll();
+ *
+ * For cross-source per-session analysis, use `mergeAll` from the
+ * `grammata/merge` entry point to get a deduplicated UnifiedSession[] with
+ * normalized tool names and source/provider breakdowns.
  */
 
 export { readClaude } from './claude.js';
@@ -21,6 +28,26 @@ export { readCodex } from './codex.js';
 export type { CodexSession, CodexSummary } from './codex.js';
 export { readCursor } from './cursor.js';
 export type { CursorSession, CursorSummary } from './cursor.js';
+export { readGoose } from './goose.js';
+export type { GooseSession, GooseSummary } from './goose.js';
+export { mergeAll, mapCodexTools, mapCursorTools } from './merge.js';
+export type { UnifiedSession, MergedUsage, SourceType, SourceStats } from './merge.js';
+export {
+  classifySession,
+  computeCostTrend,
+  computeBranchCosts,
+  computeCacheStats,
+  computeCostVelocity,
+  computeRetryStats,
+} from './analytics.js';
+export type {
+  ActivityCategory,
+  CostTrend,
+  BranchCost,
+  CacheStats,
+  CostVelocityPoint,
+  RetryStats,
+} from './analytics.js';
 export {
   CLAUDE_PRICING,
   CODEX_PRICING,
@@ -32,13 +59,7 @@ export {
 export type { ModelPricing, CodexModelPricing, CursorModelPricing } from './pricing.js';
 export { formatTokens, formatCost, formatDuration } from './format.js';
 
-type ActivityCategory =
-  | 'Building'
-  | 'Investigating'
-  | 'Debugging'
-  | 'Testing'
-  | 'Refactoring'
-  | 'Other';
+import { classifySession, type ActivityCategory } from './analytics.js';
 
 const CATEGORY_DESCRIPTIONS: Record<ActivityCategory, string> = {
   Building: 'High Edit + Write activity — creating new code',
@@ -48,35 +69,6 @@ const CATEGORY_DESCRIPTIONS: Record<ActivityCategory, string> = {
   Refactoring: 'Balanced Read + Edit — restructuring code',
   Other: 'Mixed activity patterns',
 };
-
-function classifySession(
-  toolBreakdown: Record<string, number>,
-): ActivityCategory {
-  const read =
-    (toolBreakdown['Read'] || 0) +
-    (toolBreakdown['Grep'] || 0) +
-    (toolBreakdown['Glob'] || 0);
-  const write =
-    (toolBreakdown['Edit'] || 0) + (toolBreakdown['Write'] || 0);
-  const bash = toolBreakdown['Bash'] || 0;
-  const total = Object.values(toolBreakdown).reduce(
-    (s, v) => s + v,
-    0,
-  );
-
-  if (total === 0) return 'Building';
-
-  const readRatio = read / total;
-  const writeRatio = write / total;
-  const bashRatio = bash / total;
-
-  if (writeRatio > 0.3) return 'Building';
-  if (readRatio > 0.6 && writeRatio < 0.15) return 'Investigating';
-  if (bashRatio > 0.3 && writeRatio > 0.1) return 'Debugging';
-  if (bashRatio > 0.4) return 'Testing';
-  if (writeRatio > 0.2 && readRatio > 0.3) return 'Refactoring';
-  return 'Building';
-}
 
 export interface UsageSummary {
   claude: {
@@ -130,6 +122,16 @@ export interface UsageSummary {
     totalComposerSuggestedLines: number;
     totalComposerAcceptedLines: number;
   };
+  goose: {
+    sessions: number;
+    cost: number;
+    inputTokens: number;
+    outputTokens: number;
+    models: Record<string, { sessions: number; cost: number }>;
+    providers: Record<string, { sessions: number; cost: number }>;
+    activeDays: number;
+    projects: Array<{ name: string; sessions: number; cost: number }>;
+  };
   combined: {
     totalCost: number;
     totalSessions: number;
@@ -143,6 +145,7 @@ export interface UsageSummary {
       claudeSessions: number;
       codexSessions: number;
       cursorSessions: number;
+      gooseSessions: number;
     }>;
   };
   highlights: {
@@ -188,10 +191,11 @@ export interface UsageSummary {
 }
 
 export async function readAll(): Promise<UsageSummary> {
-  const [claude, codex, cursor] = await Promise.all([
+  const [claude, codex, cursor, goose] = await Promise.all([
     (await import('./claude.js')).readClaude(),
     (await import('./codex.js')).readCodex(),
     (await import('./cursor.js')).readCursor(),
+    (await import('./goose.js')).readGoose(),
   ]);
 
   // Claude model breakdown
@@ -246,6 +250,36 @@ export async function readAll(): Promise<UsageSummary> {
       .map((s) => s.createdAt.slice(0, 10)),
   );
 
+  // Goose — skip sessions already covered by Claude JSONL / Codex readers
+  const gooseSessions = goose.sessions.filter(
+    (s) => s.providerName !== 'claude-code' && s.providerName !== 'claude-acp',
+  );
+  const gooseModels: Record<string, { sessions: number; cost: number }> = {};
+  const gooseProviders: Record<string, { sessions: number; cost: number }> = {};
+  const gooseProjects = new Map<string, { sessions: number; cost: number }>();
+  const gooseDays = new Set<string>();
+  for (const s of gooseSessions) {
+    const m = gooseModels[s.model] || { sessions: 0, cost: 0 };
+    m.sessions++;
+    m.cost += s.costUsd;
+    gooseModels[s.model] = m;
+
+    const p = gooseProviders[s.providerName] || { sessions: 0, cost: 0 };
+    p.sessions++;
+    p.cost += s.costUsd;
+    gooseProviders[s.providerName] = p;
+
+    const pe = gooseProjects.get(s.project) || { sessions: 0, cost: 0 };
+    pe.sessions++;
+    pe.cost += s.costUsd;
+    gooseProjects.set(s.project, pe);
+
+    if (s.createdAt) gooseDays.add(s.createdAt.slice(0, 10));
+  }
+  const gooseTotalCost = gooseSessions.reduce((s, x) => s + x.costUsd, 0);
+  const gooseTotalInput = gooseSessions.reduce((s, x) => s + x.inputTokens, 0);
+  const gooseTotalOutput = gooseSessions.reduce((s, x) => s + x.outputTokens, 0);
+
   // Claude projects
   const claudeProjects = new Map<
     string,
@@ -276,7 +310,7 @@ export async function readAll(): Promise<UsageSummary> {
     codexProjects.set(s.project, e);
   }
 
-  // Total tool calls (all providers)
+  // Total tool calls (all providers — Goose DB doesn't expose tool breakdown)
   const claudeToolCalls = Object.values(claude.toolBreakdown).reduce(
     (s, c) => s + c,
     0,
@@ -288,7 +322,7 @@ export async function readAll(): Promise<UsageSummary> {
   const totalToolCalls = claudeToolCalls + codexToolCalls + cursor.totalToolCalls;
 
   // All active days combined (for streak calc)
-  const allDays = new Set([...claudeDays, ...codexDays, ...cursorDays]);
+  const allDays = new Set([...claudeDays, ...codexDays, ...cursorDays, ...gooseDays]);
   const totalActiveDays = allDays.size;
 
   // Longest streak
@@ -341,6 +375,12 @@ export async function readAll(): Promise<UsageSummary> {
     allModels[m] = e;
   }
   for (const [m, info] of Object.entries(cursor.models)) {
+    const e = allModels[m] || { sessions: 0, cost: 0 };
+    e.sessions += info.sessions;
+    e.cost += info.cost;
+    allModels[m] = e;
+  }
+  for (const [m, info] of Object.entries(gooseModels)) {
     const e = allModels[m] || { sessions: 0, cost: 0 };
     e.sessions += info.sessions;
     e.cost += info.cost;
@@ -420,12 +460,22 @@ export async function readAll(): Promise<UsageSummary> {
       };
     }
   }
+  for (const s of gooseSessions) {
+    if (!mostExpensiveSession || s.costUsd > mostExpensiveSession.cost) {
+      mostExpensiveSession = {
+        cost: s.costUsd,
+        model: s.model,
+        project: s.project,
+        date: (s.createdAt || '').slice(0, 10),
+      };
+    }
+  }
 
   const totalSessions =
-    claude.sessions.length + codex.sessions.length + cursor.sessions.length;
+    claude.sessions.length + codex.sessions.length + cursor.sessions.length + gooseSessions.length;
   const avgCostPerSession =
     totalSessions > 0
-      ? (claude.totalCost + codex.totalCost + cursor.totalCost) / totalSessions
+      ? (claude.totalCost + codex.totalCost + cursor.totalCost + gooseTotalCost) / totalSessions
       : 0;
   const avgSessionsPerDay =
     totalActiveDays > 0 ? totalSessions / totalActiveDays : 0;
@@ -509,35 +559,41 @@ export async function readAll(): Promise<UsageSummary> {
       totalComposerSuggestedLines: cursor.totalComposerSuggestedLines,
       totalComposerAcceptedLines: cursor.totalComposerAcceptedLines,
     },
+    goose: {
+      sessions: gooseSessions.length,
+      cost: gooseTotalCost,
+      inputTokens: gooseTotalInput,
+      outputTokens: gooseTotalOutput,
+      models: gooseModels,
+      providers: gooseProviders,
+      activeDays: gooseDays.size,
+      projects: [...gooseProjects.entries()]
+        .map(([name, v]) => ({ name, ...v }))
+        .sort((a, b) => b.cost - a.cost)
+        .slice(0, 20),
+    },
     combined: {
-      totalCost: claude.totalCost + codex.totalCost + cursor.totalCost,
+      totalCost: claude.totalCost + codex.totalCost + cursor.totalCost + gooseTotalCost,
       totalSessions,
       totalInputTokens:
-        claude.totalInputTokens + codex.totalInputTokens + cursor.totalInputTokens,
+        claude.totalInputTokens + codex.totalInputTokens + cursor.totalInputTokens + gooseTotalInput,
       totalOutputTokens:
-        claude.totalOutputTokens + codex.totalOutputTokens + cursor.totalOutputTokens,
+        claude.totalOutputTokens + codex.totalOutputTokens + cursor.totalOutputTokens + gooseTotalOutput,
       totalActiveDays,
       dailyDistribution: (() => {
-        const days = new Map<
-          string,
-          {
-            sessions: number;
-            cost: number;
-            claudeSessions: number;
-            codexSessions: number;
-            cursorSessions: number;
-          }
-        >();
+        const empty = () => ({
+          sessions: 0,
+          cost: 0,
+          claudeSessions: 0,
+          codexSessions: 0,
+          cursorSessions: 0,
+          gooseSessions: 0,
+        });
+        const days = new Map<string, ReturnType<typeof empty>>();
         for (const s of claude.sessions) {
           const date = s.firstTimestamp.slice(0, 10);
           if (!date) continue;
-          const e = days.get(date) || {
-            sessions: 0,
-            cost: 0,
-            claudeSessions: 0,
-            codexSessions: 0,
-            cursorSessions: 0,
-          };
+          const e = days.get(date) || empty();
           e.sessions++;
           e.cost += s.costUsd;
           e.claudeSessions++;
@@ -546,13 +602,7 @@ export async function readAll(): Promise<UsageSummary> {
         for (const s of codex.sessions) {
           const date = s.createdAt.slice(0, 10);
           if (!date) continue;
-          const e = days.get(date) || {
-            sessions: 0,
-            cost: 0,
-            claudeSessions: 0,
-            codexSessions: 0,
-            cursorSessions: 0,
-          };
+          const e = days.get(date) || empty();
           e.sessions++;
           e.cost += s.costUsd;
           e.codexSessions++;
@@ -561,16 +611,19 @@ export async function readAll(): Promise<UsageSummary> {
         for (const s of cursor.sessions) {
           const date = (s.createdAt || '').slice(0, 10);
           if (!date) continue;
-          const e = days.get(date) || {
-            sessions: 0,
-            cost: 0,
-            claudeSessions: 0,
-            codexSessions: 0,
-            cursorSessions: 0,
-          };
+          const e = days.get(date) || empty();
           e.sessions++;
           e.cost += s.costUsd;
           e.cursorSessions++;
+          days.set(date, e);
+        }
+        for (const s of gooseSessions) {
+          const date = (s.createdAt || '').slice(0, 10);
+          if (!date) continue;
+          const e = days.get(date) || empty();
+          e.sessions++;
+          e.cost += s.costUsd;
+          e.gooseSessions++;
           days.set(date, e);
         }
         return [...days.entries()]
@@ -645,7 +698,7 @@ export async function readAll(): Promise<UsageSummary> {
         return { reads, writes, ratio };
       })(),
       costWithoutCache:
-        claude.totalCost + claude.cacheSavingsUsd + codex.totalCost + cursor.totalCost,
+        claude.totalCost + claude.cacheSavingsUsd + codex.totalCost + cursor.totalCost + gooseTotalCost,
       activityCategories: (() => {
         const cats = new Map<
           string,
