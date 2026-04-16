@@ -1,8 +1,10 @@
 # grammata
 
-Read and aggregate coding agent usage data from your local machine. Parses session data from **Claude Code** (`~/.claude/`), **Codex** (`~/.codex/`), and **Cursor** (SQLite DB) to give you accurate cost, token, and activity breakdowns.
+Read and aggregate coding agent usage data from your local machine. Parses session data from **Claude Code** (`~/.claude/`), **Codex** (`~/.codex/`), **Cursor** (SQLite DB), and **Goose** (`~/.local/share/goose/`) to give you accurate cost, token, and activity breakdowns.
 
 Zero external dependencies. Reads session files and databases directly from disk.
+
+> **v0.3** adds a Goose DB reader, cross-source deduplication (`mergeAll`), retry / branch / cost-velocity analytics, and a one-call `analyze()` that returns a full dashboard object in one pass.
 
 Part of the [Pella Labs](https://github.com/pella-labs) ecosystem. See also [@pella-labs/pinakes](https://www.npmjs.com/package/@pella-labs/pinakes) for building knowledge graphs over your codebase.
 
@@ -14,6 +16,24 @@ npm install grammata
 
 ## Quick Start
 
+**Dashboard in one call** — same shape a UI would render:
+
+```typescript
+import { analyze } from 'grammata';
+
+const data = await analyze();
+
+console.log(`Sessions:        ${data.totalSessions}`);
+console.log(`Total cost:      $${data.totalCost.toFixed(2)}`);
+console.log(`Cache savings:   $${data.cacheSavingsUsd.toFixed(2)}`);
+console.log(`First-try rate:  ${(data.retryStats.firstTryRate * 100).toFixed(1)}%`);
+console.log(`Peak hour:       ${data.peakHour}`);
+console.log(`Favorite model:  ${data.favoriteModel}`);
+console.log(`Top branch:      ${data.branchCosts[0]?.project}@${data.branchCosts[0]?.branch}`);
+```
+
+**Per-source summaries** — if you only want totals:
+
 ```typescript
 import { readAll } from 'grammata';
 
@@ -24,6 +44,7 @@ console.log(`Sessions:   ${data.combined.totalSessions}`);
 console.log(`Claude:     $${data.claude.cost.toFixed(2)} (${data.claude.sessions} sessions)`);
 console.log(`Codex:      $${data.codex.cost.toFixed(2)} (${data.codex.sessions} sessions)`);
 console.log(`Cursor:     ${data.cursor.sessions} sessions, ${data.cursor.totalMessages} messages`);
+console.log(`Goose:      $${data.goose.cost.toFixed(2)} (${data.goose.sessions} sessions)`);
 ```
 
 ## API
@@ -83,7 +104,7 @@ for (const session of claude.sessions) {
 }
 ```
 
-**Session fields:** `sessionId`, `sessionName`, `project`, `model`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreateTokens`, `costUsd`, `turnCount`, `toolCalls`, `toolBreakdown`, `startHour`, `firstTimestamp`, `lastTimestamp`
+**Session fields:** `sessionId`, `sessionName`, `project`, `model`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreateTokens`, `costUsd`, `turnCount`, `toolCalls`, `toolBreakdown`, `startHour`, `firstTimestamp`, `lastTimestamp`, `gitBranch`, `prLinks`, `version`, `entrypoint`, `retryCount`, `totalEditTurns`, `mostRetriedFile`, `perToolCounts`
 
 ### `readCodex(dir?)`
 
@@ -99,7 +120,7 @@ for (const session of codex.sessions) {
 }
 ```
 
-**Session fields:** `sessionId`, `sessionName`, `project`, `model`, `modelProvider`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `costUsd`, `durationMs`, `createdAt`, `updatedAt`, `source`, `gitBranch`
+**Session fields:** `sessionId`, `sessionName`, `firstMessage`, `project`, `model`, `modelProvider`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `costUsd`, `durationMs`, `createdAt`, `updatedAt`, `source`, `gitBranch`, `approvalMode`, `toolBreakdown`, `reasoningBlocks`, `messageCount`, `webSearches`
 
 ### `readCursor(dbPath?)`
 
@@ -125,6 +146,112 @@ for (const [tool, count] of Object.entries(cursor.toolBreakdown)) {
 **Summary fields:** `totalMessages`, `totalToolCalls`, `toolBreakdown`, `totalLinesAdded`, `totalLinesRemoved`, `totalFilesCreated`, `thinkingTimeMs`, `turnTimeMs`, `dailyActivity`, `dailyStats` (tab/composer completions)
 
 > **Note:** Cursor does not expose token counts or cost data in its local database. All billing happens server-side. grammata tracks sessions, messages, tool usage, lines changed, timing, and code completion stats instead.
+
+### `readGoose(dbPath?)`
+
+Read sessions from the Goose backend SQLite database. Defaults to `~/.local/share/goose/sessions/sessions.db`. Covers any provider Goose was configured with — Anthropic API, OpenRouter, Ollama, direct OpenAI — filling the gap left by the Claude-Code-only and Codex-only readers.
+
+```typescript
+import { readGoose } from 'grammata';
+
+const goose = await readGoose();
+
+for (const session of goose.sessions) {
+  console.log(session.providerName, session.model, `$${session.costUsd.toFixed(2)}`);
+}
+```
+
+**Session fields:** `sessionId`, `sessionName`, `project`, `providerName`, `model`, `inputTokens`, `outputTokens`, `createdAt`, `updatedAt`, `durationMs`, `messageCount`, `sessionType`, `costUsd`
+
+**Summary fields:** `sessions`, `totalCost`, `totalInputTokens`, `totalOutputTokens`
+
+> Requires `sqlite3` in PATH.
+
+### `analyze()`
+
+One call, everything. Reads all four sources in parallel, deduplicates sessions across them, and computes the full analytics object the Pharos dashboard renders.
+
+```typescript
+import { analyze } from 'grammata';
+
+const data = await analyze();
+
+data.totalSessions          // total across all sources
+data.totalCost              // total across all sources
+data.cacheSavingsUsd        // what caching saved
+data.costTrend              // { currentWeekCost, previousWeekCost, changePercent }
+
+data.dailyCosts             // [{ date, cost, tokens, sessions }, ...]
+data.modelBreakdowns        // [{ model, provider, cost, sessionCount, ... }, ...]
+data.sessionRows            // UnifiedSession[] — deduped across sources
+data.toolUsage              // [{ name, count }, ...]
+data.projectBreakdowns      // [{ project, cost, sessions, sources }, ...]
+data.categoryBreakdowns     // [{ category: 'Building' | 'Investigating' | ..., sessions, cost }, ...]
+data.hourDistribution       // number[24]
+
+data.branchCosts            // [{ project, branch, cost, sessions, tokens }, ...]
+data.cacheStats             // { hitRate, savingsUsd, cacheWriteTokens, ... }
+data.costVelocity           // [{ date, cost, hours, costPerHour }, ...]
+data.retryStats             // { firstTryRate, retryCostUsd, mostRetriedTool, mostRetriedFile, worstSession, perTool, ... }
+
+data.sourceStats            // { 'claude-code': {...}, codex: {...}, cursor: {...}, goose: {...} }
+data.providerStats          // { anthropic: {...}, openai: {...}, ... }
+
+data.peakHour               // 0–23
+data.mostExpensiveSession   // UnifiedSession | null
+data.favoriteModel          // e.g. 'claude-opus-4-6'
+data.favoriteTool           // e.g. 'Bash'
+```
+
+### `mergeAll(claude, codex, cursor, goose)`
+
+Lower-level primitive: takes the four per-source summaries and returns a deduplicated `UnifiedSession[]` with normalized tool names and source/provider breakdowns. Use this if you want per-session access without running the full analytics aggregation.
+
+```typescript
+import { readClaude, readCodex, readCursor, readGoose, mergeAll } from 'grammata';
+
+const merged = mergeAll(
+  await readClaude(),
+  await readCodex(),
+  await readCursor(),
+  await readGoose(),
+);
+
+for (const session of merged.sessions) {
+  console.log(session.source, session.project, session.model, `$${session.cost.toFixed(2)}`);
+}
+```
+
+**Priority** when the same `sessionId` appears in multiple sources: Claude JSONL > Codex > Cursor > Goose (Claude ships the richest per-session data). Goose sessions flagged as `claude-code` / `claude-acp` are skipped — they're already captured by the JSONL reader.
+
+**Tool name normalization**: Codex `exec_command`/`shell*` → `Bash`, `apply_patch` → `Edit`, etc. Cursor `read_file_v2` → `Read`, `edit_file_v2` → `Edit`, etc. This lets consumers aggregate tool usage across sources without re-learning each agent's naming.
+
+### `buildAnalytics(merged)`
+
+Takes a `MergedUsage` from `mergeAll` and computes the same dashboard object `analyze()` returns. Useful if you already have merged sessions (e.g. from a cached read) and just want the compute.
+
+```typescript
+import { mergeAll, buildAnalytics } from 'grammata';
+
+const data = buildAnalytics(mergeAll(claude, codex, cursor, goose));
+```
+
+### Analytics helpers
+
+All exported individually — use them if you want just one metric without the full dashboard.
+
+```typescript
+import {
+  classifySession,       // ToolBreakdown → 'Building' | 'Investigating' | 'Debugging' | 'Testing' | 'Refactoring' | 'Other'
+  computeCostTrend,      // UnifiedSession[] → { currentWeekCost, previousWeekCost, changePercent }
+  computeBranchCosts,    // UnifiedSession[] → BranchCost[]
+  computeCacheStats,     // (sessions, cacheSavingsUsd) → { hitRate, totalCacheRead, ... }
+  computeCostVelocity,   // UnifiedSession[] → CostVelocityPoint[]
+  computeRetryStats,     // UnifiedSession[] → { firstTryRate, retryCostUsd, perTool, ... }
+} from 'grammata';
+```
+
+Retry detection works off of Claude's `editsByToolAndFile` tracking: if a file is edited more than once in a session, `(edits - 1)` count as retries. Codex / Cursor / Goose sessions currently don't expose per-file edit history, so they contribute 0 retries — `firstTryRate` reflects Claude Code sessions only.
 
 ### Formatting Helpers
 
@@ -162,6 +289,8 @@ const codex = getCodexPricing('gpt-5.3-codex');
 
 ```bash
 npx grammata                    # full summary (default)
+npx grammata analytics          # full dashboard (retry, branches, velocity, cache, categories)
+npx grammata a                  # alias for analytics
 npx grammata claude             # Claude Code: cost, tokens, models, tools, projects
 npx grammata codex              # Codex: cost, tokens, models, projects
 npx grammata cursor             # Cursor: sessions, messages, tools, lines, timing
@@ -229,6 +358,61 @@ Example output (`npx grammata`):
 
   ─────────────────────────────────────
   Combined:   $8564  (3446 sessions)
+```
+
+Example output (`npx grammata analytics`):
+
+```
+  grammata analytics
+  ────────────────────────────────────────
+
+  Sessions:        3455
+  Total cost:      $8675
+  Cache savings:   $49833
+  Input tokens:    2.3B   Output: 37.7M
+
+  Week over week:  84.6%
+    current week:  $2268   prev: $1228
+
+  Sources
+    claude-code     3153 sessions   $7975
+    codex             81 sessions   $699.88
+    cursor           221 sessions   $0.0000
+
+  Activity
+    Building        2798 sessions   $3609
+    Investigating    215 sessions   $342.25
+    Debugging        213 sessions   $3705
+    Testing          166 sessions   $262.18
+    Refactoring       63 sessions   $755.95
+
+  Retry stats
+    First-try rate:  44.6%
+    Edit turns:      11421   retried: 6325
+    Retry cost:      $4451
+    Most-retried tool: Edit
+    Most-retried file: src/components/card/CardPage.tsx
+
+  Branches (top 5 by cost)
+    Landing@master                        $631.68   5 sessions
+    v2@master                             $623.21   63 sessions
+    chatbox@feat/tutormeai-apps           $484.34   7 sessions
+    ...
+
+  Cache
+    Hit rate:        83.4%
+    Cache read:      13.4B
+    Cache write:     336.1M
+
+  Velocity (last 7 days)
+    2026-04-10    $312.94   44.5h   $7.03/hr
+    2026-04-11    $509.89  162.7h   $3.13/hr
+    ...
+
+  Peak hour:       12 PM
+  Favorite model:  claude-opus-4-6
+  Favorite tool:   Bash
+  Priciest session: $398.02 — Landing (claude-opus-4-6)
 ```
 
 Example output (`npx grammata cursor`):
@@ -314,6 +498,22 @@ Data is extracted from multiple tables via `sqlite3` CLI:
 
 Cursor does not store token counts or cost data locally. All 7 queries run in parallel using `json_extract` for fast extraction without loading full JSON blobs.
 
+### Goose
+
+Reads the Goose backend SQLite database at `~/.local/share/goose/sessions/sessions.db` via the `sqlite3` CLI. Query pulls:
+
+- `accumulated_input_tokens` / `accumulated_output_tokens` (falling back to `input_tokens` / `output_tokens`)
+- `provider_name`, `working_dir`, `model_config_json`
+- `created_at`, `updated_at`, `message_count`, `session_type`
+
+Model name is extracted from `model_config_json.model_name`. Cost is computed via grammata's Claude / Codex pricing tables when the model matches a known name (heuristic: model contains `claude`/`opus`/`sonnet`/`haiku` → Claude pricing; contains `gpt`/`o3`/`o4`/`codex` → Codex pricing); otherwise falls back to per-provider defaults (`anthropic` and `openrouter` → $3/$15, `openai` → $2.50/$10, `ollama` → free).
+
+`mergeAll` automatically skips Goose sessions where `providerName === 'claude-code'` or `'claude-acp'` to avoid double-counting with the JSONL reader.
+
+### Cross-source merge
+
+`mergeAll()` deduplicates sessions across all four readers (priority: Claude > Codex > Cursor > Goose), normalizes tool names to a common vocabulary (Codex `exec_command` → `Bash`, Cursor `edit_file_v2` → `Edit`, etc.), and produces `UnifiedSession[]` with `sourceStats` / `providerStats` breakdowns. Retry detection, branch costs, cost velocity, and cost trend compute off this unified array.
+
 ### Pricing
 
 Pricing tables are sourced from [LiteLLM](https://github.com/BerriAI/litellm) and official pricing pages. Supported models:
@@ -334,7 +534,7 @@ Unknown models fall back to Sonnet pricing (Claude) or gpt-5.2-codex pricing (Co
 ## Requirements
 
 - Node.js 18+
-- `sqlite3` CLI tool in PATH (for Codex session metadata and Cursor data; all Claude data works without it)
+- `sqlite3` CLI tool in PATH (for Codex session metadata, Cursor data, and Goose sessions; all Claude data works without it)
 
 ## Related
 
