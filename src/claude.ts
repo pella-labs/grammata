@@ -2,10 +2,11 @@
  * Reads Claude Code session JSONL files from ~/.claude/projects/
  * and aggregates token usage, cost, and model data.
  */
-import { lstat, readdir, readFile } from 'fs/promises';
+import { lstat, readdir } from 'fs/promises';
 import { join } from 'path';
 import { homedir } from 'os';
 import { CLAUDE_PRICING, getClaudePricing } from './pricing.js';
+import { streamJsonLines } from './jsonl.js';
 
 export { CLAUDE_PRICING };
 
@@ -15,6 +16,7 @@ export interface ClaudeSession {
   project: string;
   firstTimestamp: string;
   lastTimestamp: string;
+  durationMs: number;
   model: string;
   inputTokens: number;
   outputTokens: number;
@@ -48,8 +50,6 @@ export interface ClaudeSummary {
   hourDistribution: number[];
 }
 
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
-
 interface ToolUseBlock {
   type?: string;
   name?: string;
@@ -58,7 +58,9 @@ interface ToolUseBlock {
 
 interface AssistantMessage {
   type: string;
+  requestId?: string;
   message: {
+    id?: string;
     model?: string;
     usage?: {
       input_tokens?: number;
@@ -86,16 +88,24 @@ async function parseSessionFile(
   try {
     const fileInfo = await lstat(filePath);
     if (fileInfo.isSymbolicLink()) return null;
-    if (fileInfo.size > MAX_FILE_SIZE) return null;
-
-    const content = await readFile(filePath, 'utf-8');
-    const lines = content.split('\n').filter((l) => l.trim());
 
     let model = 'unknown';
-    let totalInput = 0;
-    let totalOutput = 0;
-    let cacheRead = 0;
-    let cacheCreate = 0;
+    // B2 fix: Claude Code writes multiple assistant records for the same turn
+    // (mid-stream partial + final). They share `message.id` / `requestId` but
+    // the usage counters on the later record reflect the full turn, not a
+    // delta. Naive summation double-counts every turn's cache tokens. We
+    // dedup by message.id (fallback: requestId; fallback: uuid) and take
+    // max-per-field so the larger final record wins without adding to the
+    // partial.
+    const usageByKey = new Map<
+      string,
+      {
+        input: number;
+        output: number;
+        cacheRead: number;
+        cacheCreate: number;
+      }
+    >();
     let turnCount = 0;
     let toolCalls = 0;
     const toolBreakdown: Record<string, number> = {};
@@ -108,7 +118,7 @@ async function parseSessionFile(
     let version = '';
     let entrypoint = '';
 
-    for (const line of lines) {
+    await streamJsonLines(filePath, (line) => {
       try {
         const d = JSON.parse(line) as Record<string, unknown>;
 
@@ -137,11 +147,26 @@ async function parseSessionFile(
         if (isAssistantWithUsage(d)) {
           const usage = d.message.usage;
           if (usage) {
-            totalInput += usage.input_tokens || 0;
-            totalOutput += usage.output_tokens || 0;
-            cacheRead += usage.cache_read_input_tokens || 0;
-            cacheCreate += usage.cache_creation_input_tokens || 0;
-            turnCount++;
+            const key =
+              d.message.id ||
+              d.requestId ||
+              (d as unknown as { uuid?: string }).uuid ||
+              `anon-${usageByKey.size}`;
+            const prev = usageByKey.get(key);
+            const next = {
+              input: Math.max(prev?.input ?? 0, usage.input_tokens || 0),
+              output: Math.max(prev?.output ?? 0, usage.output_tokens || 0),
+              cacheRead: Math.max(
+                prev?.cacheRead ?? 0,
+                usage.cache_read_input_tokens || 0,
+              ),
+              cacheCreate: Math.max(
+                prev?.cacheCreate ?? 0,
+                usage.cache_creation_input_tokens || 0,
+              ),
+            };
+            usageByKey.set(key, next);
+            if (!prev) turnCount++;
           }
 
           if (d.message.model && d.message.model !== '<synthetic>') {
@@ -156,10 +181,10 @@ async function parseSessionFile(
                 toolBreakdown[toolName] =
                   (toolBreakdown[toolName] || 0) + 1;
                 if (toolName === 'Edit' || toolName === 'Write' || toolName === 'MultiEdit') {
-                  const filePath = c.input?.file_path;
-                  if (filePath) {
+                  const toolFilePath = c.input?.file_path;
+                  if (toolFilePath) {
                     const byFile = editsByToolAndFile[toolName] || {};
-                    byFile[filePath] = (byFile[filePath] || 0) + 1;
+                    byFile[toolFilePath] = (byFile[toolFilePath] || 0) + 1;
                     editsByToolAndFile[toolName] = byFile;
                   }
                 }
@@ -170,9 +195,20 @@ async function parseSessionFile(
       } catch {
         // Skip malformed lines
       }
-    }
+    });
 
     if (turnCount === 0) return null;
+
+    let totalInput = 0;
+    let totalOutput = 0;
+    let cacheRead = 0;
+    let cacheCreate = 0;
+    for (const v of usageByKey.values()) {
+      totalInput += v.input;
+      totalOutput += v.output;
+      cacheRead += v.cacheRead;
+      cacheCreate += v.cacheCreate;
+    }
 
     const pricing = getClaudePricing(model);
     const costUsd =
@@ -210,12 +246,18 @@ async function parseSessionFile(
       retryCount += retried;
     }
 
+    const durationMs =
+      firstTs && lastTs
+        ? Math.max(new Date(lastTs).getTime() - new Date(firstTs).getTime(), 0)
+        : 0;
+
     return {
       sessionId,
       sessionName: sessionName || sessionId.slice(0, 8),
       project: projectName,
       firstTimestamp: firstTs,
       lastTimestamp: lastTs,
+      durationMs,
       model,
       inputTokens: totalInput,
       outputTokens: totalOutput,

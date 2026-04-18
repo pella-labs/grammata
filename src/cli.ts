@@ -16,11 +16,12 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
+import { resolveCliArgs, isSubmitToken } from './cli-args.js';
 
 // ── Onboarding: check cleanupPeriodDays ──────────────────
 
 async function checkClaudeRetention(): Promise<void> {
-  if (jsonMode) return;
+  if (jsonMode || !process.stdin.isTTY || !process.stdout.isTTY) return;
 
   const settingsPath = join(homedir(), '.claude', 'settings.json');
   const markerPath = join(homedir(), '.claude', '.grammata-onboarded');
@@ -120,7 +121,7 @@ class Spinner {
   private startTime = 0;
 
   start(): void {
-    if (jsonMode) return;
+    if (jsonMode || !process.stdout.isTTY) return;
     this.startTime = Date.now();
     this.frame = 0;
     process.stdout.write('\x1B[?25l');
@@ -159,6 +160,7 @@ const args = process.argv.slice(2);
 
 const COMMANDS = new Set([
   'summary',
+  'submit',
   'claude',
   'cc',
   'codex',
@@ -178,11 +180,9 @@ const COMMANDS = new Set([
   'help',
 ]);
 
-const command =
-  args.find((a) => COMMANDS.has(a)) ||
-  (args.some((a) => a === '--help' || a === '-h') ? 'help' : 'summary');
-const flags = new Set(args.slice(1));
-const jsonMode = flags.has('--json') || flags.has('-j');
+const { command, bareToken, unknownCommand, positionals } =
+  resolveCliArgs(args, COMMANDS);
+const jsonMode = args.includes('--json') || args.includes('-j');
 
 // Parse --since and --until date flags
 
@@ -231,10 +231,12 @@ function printHelp(): void {
   @pella-labs/grammata \u2014 coding agent usage analytics
 
   USAGE
-    grammata <command> [options]
+    grammata <token>                # submit a Bematist stats card
+    grammata <command> [options]    # inspect local data
 
   COMMANDS
     summary          Overview of all sources (default)
+    submit           Submit a Bematist stats card
     claude           Claude Code details
     codex            Codex details
     cursor           Cursor AI details
@@ -246,29 +248,29 @@ function printHelp(): void {
     daily            Daily cost breakdown
     hours            Activity by hour of day
     analytics        Full dashboard (retry, branches, velocity, cache)
-    pharos           Generate a shareable stats card
 
   OPTIONS
+    --api-url        Override Bematist ingest URL (default: https://bematist.dev/api)
     --json, -j       Output as JSON
     --since, -s      Filter from date (YYYY-MM-DD)
     --until, -u      Filter until date (YYYY-MM-DD)
 
   EXAMPLES
-    grammata                    # full summary (all time)
-    grammata --since 2026-04-01 # this month only
-    grammata --since 2026-03-01 --until 2026-03-31  # March only
-    grammata claude             # Claude Code details
-    grammata codex              # Codex details
-    grammata cursor             # Cursor AI details
-    grammata sessions           # all sessions
-    grammata models --json      # model breakdown as JSON
-    grammata cost               # cost summary
-    grammata tools              # tool usage ranking
-    grammata daily              # day-by-day costs
-    grammata hours              # activity heatmap by hour
-    grammata analytics          # full dashboard output
-    grammata analytics --json   # dashboard as JSON
-    grammata pharos --token <token>  # generate shareable stats card
+    grammata <token>                          # submit a shareable stats card
+    grammata <token> --api-url http://localhost:3000/api  # local Bematist
+    grammata                                  # full summary (all time)
+    grammata --since 2026-04-01               # this month only
+    grammata --since 2026-03-01 --until 2026-03-31   # March only
+    grammata claude                           # Claude Code details
+    grammata codex                            # Codex details
+    grammata cursor                           # Cursor AI details
+    grammata sessions                         # all sessions
+    grammata models --json                    # model breakdown as JSON
+    grammata analytics                        # full dashboard output
+
+  LINKS
+    https://bematist.dev          Generate a token, view your card
+    https://x.com/bematist_dev    Follow for updates
 `);
 }
 
@@ -1582,19 +1584,32 @@ async function cmdAnalytics(): Promise<void> {
   console.log('');
 }
 
-async function cmdPharos(): Promise<void> {
-  const token = getFlag('token');
-  const apiUrl =
-    getFlag('api-url') ||
-    'https://pharos-ade.com/api';
+const DEFAULT_API_URL =
+  process.env.GRAMMATA_API_URL || 'https://bematist.dev/api';
+
+async function cmdSubmit(token: string | undefined): Promise<void> {
+  const apiUrl = getFlag('api-url') || DEFAULT_API_URL;
 
   if (!token) {
     console.log('');
     console.log(
-      '  \x1B[31m\u2717\x1B[0m  Missing --token flag.',
+      '  \x1B[31m\u2717\x1B[0m  Missing token.',
     );
     console.log(
-      '     Generate a token at \x1B[36mhttps://pharos-ade.com\x1B[0m',
+      '     Generate a token at \x1B[36mhttps://bematist.dev\x1B[0m',
+    );
+    console.log('     Then run: \x1B[36mnpx grammata <token>\x1B[0m');
+    console.log('');
+    process.exit(1);
+  }
+
+  if (!isSubmitToken(token)) {
+    console.log('');
+    console.log(
+      '  \x1B[31m\u2717\x1B[0m  Invalid token format.',
+    );
+    console.log(
+      '     Expected a Bematist token such as \x1B[36mbm_...\x1B[0m or \x1B[36mbematist_...\x1B[0m',
     );
     console.log('');
     process.exit(1);
@@ -1603,7 +1618,6 @@ async function cmdPharos(): Promise<void> {
   // Gather stats (use readAll for full data including highlights)
   const summary = await readAll();
 
-  // Submit to Pharos backend
   const url = `${apiUrl}/card/submit`;
   try {
     const res = await fetch(url, {
@@ -1623,23 +1637,36 @@ async function cmdPharos(): Promise<void> {
       );
       console.log(`     \x1B[36m${data.cardUrl}\x1B[0m`);
       console.log('');
+      console.log(
+        '     Follow \x1B[36mhttps://x.com/bematist_dev\x1B[0m for updates',
+      );
+      console.log('');
 
-      // Open in default browser
-      const { exec } = await import('child_process');
-      const openCmd =
-        process.platform === 'darwin'
-          ? 'open'
-          : process.platform === 'win32'
-            ? 'start'
-            : 'xdg-open';
-      exec(`${openCmd} ${data.cardUrl}`);
+      try {
+        const parsedUrl = new URL(data.cardUrl);
+        if (
+          parsedUrl.protocol === 'http:' ||
+          parsedUrl.protocol === 'https:'
+        ) {
+          const { execFile } = await import('child_process');
+          if (process.platform === 'darwin') {
+            execFile('open', [parsedUrl.toString()]);
+          } else if (process.platform === 'win32') {
+            execFile('cmd', ['/c', 'start', '', parsedUrl.toString()]);
+          } else {
+            execFile('xdg-open', [parsedUrl.toString()]);
+          }
+        }
+      } catch {
+        // Invalid or unsupported URL; leave the printed URL for manual open.
+      }
     } else if (res.status === 401) {
       console.log('');
       console.log(
         '  \x1B[31m\u2717\x1B[0m  Invalid or expired token.',
       );
       console.log(
-        '     Generate a new one at \x1B[36mhttps://pharos-ade.com\x1B[0m',
+        '     Generate a new one at \x1B[36mhttps://bematist.dev\x1B[0m',
       );
       console.log('');
       process.exit(1);
@@ -1692,12 +1719,24 @@ async function run(): Promise<void> {
     case 'analytics':
     case 'a':
       return cmdAnalytics();
+    case 'submit':
+      return cmdSubmit(positionals[1] || bareToken || getFlag('token'));
     case 'pharos':
-      return cmdPharos();
+      // Hidden back-compat alias for the legacy `grammata pharos --token <t>`
+      // invocation. Accepts an explicit prefixed positional token too.
+      return cmdSubmit(
+        positionals[1] && isSubmitToken(positionals[1])
+          ? positionals[1]
+          : getFlag('token'),
+      );
     case 'help':
     case '--help':
     case '-h':
       return printHelp();
+    case 'unknown':
+      console.error(`  Unknown command: ${unknownCommand}`);
+      printHelp();
+      process.exit(1);
     default:
       console.error(`  Unknown command: ${command}`);
       printHelp();

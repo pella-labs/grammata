@@ -1,6 +1,6 @@
 /**
  * Derived metrics that sit on top of UnifiedSession[] — the same
- * computations Pharos's dashboard performs, extracted so any consumer
+ * computations the Bematist dashboard performs, extracted so any consumer
  * can reuse them without rebuilding the aggregation logic.
  */
 import type { MergedUsage, SourceStats, SourceType, UnifiedSession } from './merge.js';
@@ -327,7 +327,7 @@ export interface AnalyticsData {
 
 /**
  * One-shot aggregator: takes a merged session set and returns every
- * metric the Pharos dashboard renders, computed in a single pass.
+ * metric the Bematist dashboard renders, computed in a single pass.
  */
 export function buildAnalytics(merged: MergedUsage): AnalyticsData {
   const dailyMap = new Map<string, DailyCost>();

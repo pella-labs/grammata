@@ -3,18 +3,18 @@
  * Each session has per-turn token breakdowns (input, cached, output, reasoning).
  * Falls back to SQLite threads table for session metadata (title, cwd, git branch).
  */
-import { readdir, readFile, lstat } from 'fs/promises';
+import { readdir, lstat } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { CODEX_PRICING, getCodexPricing } from './pricing.js';
+import { streamJsonLines } from './jsonl.js';
 
 export { CODEX_PRICING };
 
 const execFileAsync = promisify(execFile);
-const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 export interface CodexSession {
   sessionId: string;
@@ -37,6 +37,10 @@ export interface CodexSession {
   reasoningBlocks: number;
   messageCount: number;
   webSearches: number;
+  // Retry signals (B4): failed shell commands + failed patches.
+  // totalActions = commands + patches attempted; retryCount = failures among them.
+  retryCount: number;
+  totalActions: number;
 }
 
 export interface CodexSummary {
@@ -84,6 +88,8 @@ interface ParsedSessionData {
   reasoningBlocks: number;
   messageCount: number;
   webSearches: number;
+  retryCount: number;
+  totalActions: number;
 }
 
 async function loadThreadMeta(
@@ -148,11 +154,7 @@ async function parseSessionFile(
 ): Promise<ParsedSessionData | null> {
   try {
     const fileInfo = await lstat(filePath);
-    if (fileInfo.isSymbolicLink() || fileInfo.size > MAX_FILE_SIZE)
-      return null;
-
-    const content = await readFile(filePath, 'utf-8');
-    const lines = content.split('\n').filter((l) => l.trim());
+    if (fileInfo.isSymbolicLink()) return null;
 
     let model = '';
     let sessionId = '';
@@ -160,15 +162,29 @@ async function parseSessionFile(
     let source = '';
     let firstTs = '';
     let lastTs = '';
-    let inputTokens = 0;
-    let cachedInputTokens = 0;
-    let outputTokens = 0;
+    // B1 fix: Codex token_count events carry `info.total_token_usage` — a
+    // cumulative, monotonically non-decreasing session total — alongside the
+    // per-turn `info.last_token_usage`. The CLI emits each token_count event
+    // twice in quick succession and re-emits partial values during streaming,
+    // so summing `last_token_usage` naively overcounts. We track the max of
+    // `total_token_usage` across the session; for older CLI builds that only
+    // expose `last_token_usage`, we fall back to keyed dedup (max-per-field
+    // per emission signature) so duplicate emissions collapse.
+    let totalInputMax = 0;
+    let totalCachedMax = 0;
+    let totalOutputMax = 0;
+    const lastUsageEntries: Array<{ input: number; cached: number; output: number }> = [];
+    let sawTotalUsage = false;
+    let previousLastUsageSignature = '';
+    let previousLastUsageTs = Number.NaN;
     const toolBreakdown: Record<string, number> = {};
     let reasoningBlocks = 0;
     let messageCount = 0;
     let webSearches = 0;
+    let retryCount = 0;
+    let totalActions = 0;
 
-    for (const line of lines) {
+    await streamJsonLines(filePath, (line) => {
       try {
         const d = JSON.parse(line) as Record<string, unknown>;
 
@@ -202,11 +218,51 @@ async function parseSessionFile(
             string,
             unknown
           >;
-          const usage = info.last_token_usage as Record<string, number> | undefined;
-          if (usage) {
-            inputTokens += usage.input_tokens || 0;
-            cachedInputTokens += usage.cached_input_tokens || 0;
-            outputTokens += usage.output_tokens || 0;
+          const total = info.total_token_usage as
+            | Record<string, number>
+            | undefined;
+          if (total) {
+            sawTotalUsage = true;
+            if ((total.input_tokens || 0) > totalInputMax)
+              totalInputMax = total.input_tokens || 0;
+            if ((total.cached_input_tokens || 0) > totalCachedMax)
+              totalCachedMax = total.cached_input_tokens || 0;
+            if ((total.output_tokens || 0) > totalOutputMax)
+              totalOutputMax = total.output_tokens || 0;
+          }
+          const last = info.last_token_usage as
+            | Record<string, number>
+            | undefined;
+          if (!sawTotalUsage && last) {
+            const signature = `${last.input_tokens || 0}:${last.cached_input_tokens || 0}:${last.output_tokens || 0}:${last.reasoning_output_tokens || 0}`;
+            const currentTs = Date.parse((d.timestamp as string) || '');
+            const isDuplicateEmission =
+              signature === previousLastUsageSignature &&
+              Number.isFinite(currentTs) &&
+              Number.isFinite(previousLastUsageTs) &&
+              currentTs - previousLastUsageTs <= 2_000;
+            if (!isDuplicateEmission) {
+              lastUsageEntries.push({
+                input: last.input_tokens || 0,
+                cached: last.cached_input_tokens || 0,
+                output: last.output_tokens || 0,
+              });
+            }
+            previousLastUsageSignature = signature;
+            previousLastUsageTs = currentTs;
+          }
+        }
+
+        // Retry signals (B4): failed shell commands / failed patches.
+        if (d.type === 'event_msg') {
+          const payload = d.payload as Record<string, unknown> | undefined;
+          const pt = payload?.type as string | undefined;
+          if (pt === 'exec_command_end') {
+            totalActions++;
+            if ((payload?.exit_code as number) !== 0) retryCount++;
+          } else if (pt === 'patch_apply_end') {
+            totalActions++;
+            if (payload?.success === false) retryCount++;
           }
         }
 
@@ -231,6 +287,21 @@ async function parseSessionFile(
       } catch {
         // Skip malformed lines
       }
+    });
+
+    let inputTokens = 0;
+    let cachedInputTokens = 0;
+    let outputTokens = 0;
+    if (sawTotalUsage) {
+      inputTokens = totalInputMax;
+      cachedInputTokens = totalCachedMax;
+      outputTokens = totalOutputMax;
+    } else {
+      for (const v of lastUsageEntries) {
+        inputTokens += v.input;
+        cachedInputTokens += v.cached;
+        outputTokens += v.output;
+      }
     }
 
     if (inputTokens === 0 && outputTokens === 0) return null;
@@ -249,6 +320,8 @@ async function parseSessionFile(
       reasoningBlocks,
       messageCount,
       webSearches,
+      retryCount,
+      totalActions,
     };
   } catch {
     return null;
@@ -367,6 +440,8 @@ export async function readCodex(dir?: string): Promise<CodexSummary> {
           reasoningBlocks: sess.reasoningBlocks,
           messageCount: sess.messageCount,
           webSearches: sess.webSearches,
+          retryCount: sess.retryCount,
+          totalActions: sess.totalActions,
         });
 
         result.totalCost += costUsd;

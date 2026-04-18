@@ -43,20 +43,43 @@ export const CODEX_PRICING: Record<string, CodexModelPricing> = {
   'o4-mini': { input: 1.1, output: 4.4, cachedInput: 0.55 },
 };
 
+function longestIncludesMatch<T>(
+  model: string,
+  table: Record<string, T>,
+): T | null {
+  const normalized = model.toLowerCase();
+  const match = Object.entries(table)
+    .sort((a, b) => b[0].length - a[0].length)
+    .find(([key]) => normalized.includes(key.toLowerCase()));
+
+  return match ? match[1] : null;
+}
+
 export function getClaudePricing(model: string): ModelPricing {
   if (CLAUDE_PRICING[model]) return CLAUDE_PRICING[model];
-  for (const [key, pricing] of Object.entries(CLAUDE_PRICING)) {
-    if (model.startsWith(key.split('-').slice(0, 3).join('-')))
-      return pricing;
-  }
+  const normalized = model.toLowerCase();
+
+  const exactPrefixMatch = Object.entries(CLAUDE_PRICING)
+    .sort((a, b) => b[0].length - a[0].length)
+    .find(([key]) => normalized.startsWith(key.toLowerCase()));
+  if (exactPrefixMatch) return exactPrefixMatch[1];
+
+  if (normalized.startsWith('claude-opus-4'))
+    return CLAUDE_PRICING['claude-opus-4-6'];
+  if (normalized.startsWith('claude-sonnet-4'))
+    return CLAUDE_PRICING['claude-sonnet-4-6'];
+  if (normalized.startsWith('claude-haiku-4'))
+    return CLAUDE_PRICING['claude-haiku-4-5-20251001'];
+  if (normalized.startsWith('claude-haiku-3-5'))
+    return CLAUDE_PRICING['claude-haiku-3-5'];
+
   return { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 };
 }
 
 export function getCodexPricing(model: string): CodexModelPricing {
   if (CODEX_PRICING[model]) return CODEX_PRICING[model];
-  for (const [key, pricing] of Object.entries(CODEX_PRICING)) {
-    if (model.includes(key) || key.includes(model)) return pricing;
-  }
+  const longestMatch = longestIncludesMatch(model, CODEX_PRICING);
+  if (longestMatch) return longestMatch;
   return { input: 1.75, output: 14, cachedInput: 0.175 };
 }
 
@@ -93,9 +116,8 @@ export const CURSOR_PRICING: Record<string, CursorModelPricing> = {
 export function getCursorPricing(model: string): CursorModelPricing {
   if (CURSOR_PRICING[model]) return CURSOR_PRICING[model];
   // Try prefix matching for versioned model names
-  for (const [key, pricing] of Object.entries(CURSOR_PRICING)) {
-    if (model.includes(key) || key.includes(model)) return pricing;
-  }
+  const longestMatch = longestIncludesMatch(model, CURSOR_PRICING);
+  if (longestMatch) return longestMatch;
   // Also check if it's a Claude or GPT model we already know about
   if (model.includes('claude')) {
     const cp = getClaudePricing(model);
