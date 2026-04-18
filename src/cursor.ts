@@ -63,6 +63,7 @@ export interface CursorSummary {
   models: Record<string, { sessions: number; cost: number }>;
   toolBreakdown: Record<string, number>;
   totalToolCalls: number;
+  totalToolErrors: number;
   thinkingTimeMs: number;
   turnTimeMs: number;
   dailyActivity: CursorDailyActivity[];
@@ -167,6 +168,7 @@ export async function readCursor(dbPathOverride?: string): Promise<CursorSummary
     models: {},
     toolBreakdown: {},
     totalToolCalls: 0,
+    totalToolErrors: 0,
     thinkingTimeMs: 0,
     turnTimeMs: 0,
     dailyActivity: [],
@@ -181,7 +183,7 @@ export async function readCursor(dbPathOverride?: string): Promise<CursorSummary
   if (!dbPath) return result;
 
   // Run all queries in parallel
-  const [composerRows, headerWorkspaces, statsRows, toolRows, timingRows, filesCreated, dailyActivityRows] = await Promise.all([
+  const [composerRows, headerWorkspaces, statsRows, toolRows, timingRows, filesCreated, dailyActivityRows, toolErrorRow] = await Promise.all([
     // 1. All sessions from composerData — uses json_extract for speed
     //    (SQLite does the parsing, no need to ship 465 full JSON blobs to Node)
     queryJson<ComposerRow[]>(
@@ -267,6 +269,19 @@ export async function readCursor(dbPathOverride?: string): Promise<CursorSummary
        AND json_extract(CAST(value AS TEXT), '$.createdAt') IS NOT NULL
        GROUP BY day
        ORDER BY day`,
+    ),
+
+    // 8. Tool call errors (B4 retry signal)
+    queryJson<Array<{ err_cnt: number }>>(
+      dbPath,
+      `SELECT COUNT(*) as err_cnt
+       FROM cursorDiskKV
+       WHERE key LIKE 'bubbleId:%'
+       AND CAST(value AS TEXT) LIKE '%toolFormerData%'
+       AND COALESCE(
+         json_extract(CAST(value AS TEXT), '$.toolFormerData.additionalData.status'),
+         json_extract(CAST(value AS TEXT), '$.toolFormerData.status')
+       ) = 'error'`,
     ),
   ]);
 
@@ -367,6 +382,11 @@ export async function readCursor(dbPathOverride?: string): Promise<CursorSummary
   if (timingRows && timingRows[0]) {
     result.thinkingTimeMs = timingRows[0].total_thinking_ms || 0;
     result.turnTimeMs = timingRows[0].total_turn_ms || 0;
+  }
+
+  // ── Tool errors (B4 retry signal) ────────────────────────
+  if (toolErrorRow && toolErrorRow[0]) {
+    result.totalToolErrors = toolErrorRow[0].err_cnt || 0;
   }
 
   // ── Files created ────────────────────────────────────────

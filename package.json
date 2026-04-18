@@ -1,13 +1,13 @@
 {
   "name": "grammata",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "Read and aggregate coding agent usage data from Claude Code (~/.claude), Codex (~/.codex), Cursor, and Goose",
   "author": "Pella Labs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pella-labs/pharos.git"
+    "url": "git+https://github.com/pella-labs/bematist.git"
   },
-  "homepage": "https://github.com/pella-labs/pharos/tree/main/packages/analytics-engine",
+  "homepage": "https://bematist.dev",
   "engines": {
     "node": ">=18"
   },
@@ -28,6 +28,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "postbuild": "chmod +x dist/cli.js",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -45,7 +46,7 @@
   ],
   "license": "MIT",
   "devDependencies": {
-    "@types/node": "^25.6.0",
+    "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.0"

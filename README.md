@@ -4,6 +4,8 @@ Read and aggregate coding agent usage data from your local machine. Parses sessi
 
 Zero external dependencies. Reads session files and databases directly from disk.
 
+Powers [**Bematist**](https://bematist.dev) — the stats-card backend — but usable standalone. Follow [@bematist_dev](https://x.com/bematist_dev) for updates.
+
 > **v0.3** adds a Goose DB reader, cross-source deduplication (`mergeAll`), retry / branch / cost-velocity analytics, and a one-call `analyze()` that returns a full dashboard object in one pass.
 
 Part of the [Pella Labs](https://github.com/pella-labs) ecosystem. See also [@pella-labs/pinakes](https://www.npmjs.com/package/@pella-labs/pinakes) for building knowledge graphs over your codebase.
@@ -169,7 +171,7 @@ for (const session of goose.sessions) {
 
 ### `analyze()`
 
-One call, everything. Reads all four sources in parallel, deduplicates sessions across them, and computes the full analytics object the Pharos dashboard renders.
+One call, everything. Reads all four sources in parallel, deduplicates sessions across them, and computes the full analytics object the Bematist dashboard renders.
 
 ```typescript
 import { analyze } from 'grammata';
@@ -301,7 +303,8 @@ npx grammata tokens             # token breakdown by source
 npx grammata cost               # cost summary + cache savings
 npx grammata daily              # day-by-day costs with chart
 npx grammata hours              # activity by hour of day
-npx grammata pharos --token T   # generate shareable stats card
+npx grammata <token>            # submit a Bematist stats card (npx grammata bematist_abc-123-xyz)
+npx grammata <token> --api-url http://localhost:3000/api   # override ingest URL for local Bematist
 ```
 
 All commands support `--json` for machine-readable output and `--since`/`--until` for date filtering:

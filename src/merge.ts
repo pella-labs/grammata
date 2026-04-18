@@ -147,10 +147,7 @@ export function mergeAll(
         name: s.sessionName,
         project: normalizeClaudeProject(s.project),
         date: s.firstTimestamp,
-        durationMs:
-          s.firstTimestamp && s.lastTimestamp
-            ? Math.max(new Date(s.lastTimestamp).getTime() - new Date(s.firstTimestamp).getTime(), 0)
-            : 0,
+        durationMs: s.durationMs,
         model: s.model,
         source: 'claude-code',
         provider: 'anthropic',
@@ -211,8 +208,8 @@ export function mergeAll(
         prLinks: [],
         version: '',
         entrypoint: '',
-        retryCount: 0,
-        totalEditTurns: 0,
+        retryCount: s.retryCount,
+        totalEditTurns: s.totalActions,
         mostRetriedFile: null,
         perToolCounts: {},
       });

@@ -1,0 +1,6 @@
+{"timestamp":"2026-01-02T10:00:00.000Z","type":"session_meta","payload":{"id":"legacy-session-001","cwd":"/Users/test/legacy-project","source":"cli","originator":"cli"}}
+{"timestamp":"2026-01-02T10:00:00.050Z","type":"turn_context","payload":{"model":"gpt-5.1-codex"}}
+{"timestamp":"2026-01-02T10:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":120},"model_context_window":200000}}}
+{"timestamp":"2026-01-02T10:00:01.400Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":120},"model_context_window":200000}}}
+{"timestamp":"2026-01-02T10:00:10.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":120},"model_context_window":200000}}}
+{"timestamp":"2026-01-02T10:00:10.500Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":120},"model_context_window":200000}}}
