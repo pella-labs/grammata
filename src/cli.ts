@@ -1585,7 +1585,7 @@ async function cmdAnalytics(): Promise<void> {
 }
 
 const DEFAULT_API_URL =
-  process.env.GRAMMATA_API_URL || 'https://bematist.dev/api';
+  process.env.GRAMMATA_API_URL || 'https://www.bematist.dev/api';
 
 async function cmdSubmit(token: string | undefined): Promise<void> {
   const apiUrl = getFlag('api-url') || DEFAULT_API_URL;
@@ -1661,9 +1661,10 @@ async function cmdSubmit(token: string | undefined): Promise<void> {
         // Invalid or unsupported URL; leave the printed URL for manual open.
       }
     } else if (res.status === 401) {
+      const body = await res.text();
       console.log('');
       console.log(
-        '  \x1B[31m\u2717\x1B[0m  Invalid or expired token.',
+        `  \x1B[31m\u2717\x1B[0m  Invalid or expired token. (${body})`,
       );
       console.log(
         '     Generate a new one at \x1B[36mhttps://bematist.dev\x1B[0m',

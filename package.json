@@ -1,6 +1,6 @@
 {
   "name": "grammata",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Read and aggregate coding agent usage data from Claude Code (~/.claude), Codex (~/.codex), Cursor, and Goose",
   "author": "Pella Labs",
   "repository": {
