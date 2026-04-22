@@ -4,7 +4,7 @@ Read and aggregate coding agent usage data from your local machine. Parses sessi
 
 Zero external dependencies. Reads session files and databases directly from disk.
 
-Powers [**Bematist**](https://bematist.dev) — the stats-card backend — but usable standalone. Follow [@bematist_dev](https://x.com/bematist_dev) for updates.
+Powers [**Pellametric**](https://www.pellametric.com) — the stats-card backend — but usable standalone. Follow [@pellametric](https://x.com/pellametric) for updates.
 
 > **v0.3** adds a Goose DB reader, cross-source deduplication (`mergeAll`), retry / branch / cost-velocity analytics, and a one-call `analyze()` that returns a full dashboard object in one pass.
 
@@ -303,8 +303,10 @@ npx grammata tokens             # token breakdown by source
 npx grammata cost               # cost summary + cache savings
 npx grammata daily              # day-by-day costs with chart
 npx grammata hours              # activity by hour of day
-npx grammata <token>            # submit a Bematist stats card (npx grammata bematist_abc-123-xyz)
-npx grammata <token> --api-url http://localhost:3000/api   # override ingest URL for local Bematist
+npx grammata <token>            # submit a stats card (e.g. npx grammata bm_abc-123-xyz)
+npx pellametric <token>         # same, hits https://www.pellametric.com/api
+npx bematist <token>            # same, hits https://bematist.dev/api
+npx grammata <token> --api-url http://localhost:3000/api   # override ingest URL
 ```
 
 All commands support `--json` for machine-readable output and `--since`/`--until` for date filtering:

@@ -250,14 +250,14 @@ function printHelp(): void {
     analytics        Full dashboard (retry, branches, velocity, cache)
 
   OPTIONS
-    --api-url        Override Bematist ingest URL (default: https://bematist.dev/api)
+    --api-url        Override ingest URL (default: ${BRAND.apiUrl})
     --json, -j       Output as JSON
     --since, -s      Filter from date (YYYY-MM-DD)
     --until, -u      Filter until date (YYYY-MM-DD)
 
   EXAMPLES
     grammata <token>                          # submit a shareable stats card
-    grammata <token> --api-url http://localhost:3000/api  # local Bematist
+    grammata <token> --api-url http://localhost:3000/api  # local ingest
     grammata                                  # full summary (all time)
     grammata --since 2026-04-01               # this month only
     grammata --since 2026-03-01 --until 2026-03-31   # March only
@@ -269,8 +269,8 @@ function printHelp(): void {
     grammata analytics                        # full dashboard output
 
   LINKS
-    https://bematist.dev          Generate a token, view your card
-    https://x.com/bematist_dev    Follow for updates
+    ${BRAND.url}          Generate a token, view your card
+    https://x.com/pellametric    Follow for updates
 `);
 }
 
@@ -1584,8 +1584,34 @@ async function cmdAnalytics(): Promise<void> {
   console.log('');
 }
 
-const DEFAULT_API_URL =
-  process.env.GRAMMATA_API_URL || 'https://www.bematist.dev/api';
+function detectBrand(): {
+  name: string;
+  host: string;
+  url: string;
+  apiUrl: string;
+} {
+  const envBrand = (process.env.GRAMMATA_BRAND || '').toLowerCase();
+  const invoked = (process.argv[1] || '').split(/[\\/]/).pop() || '';
+  const stripped = invoked.replace(/\.(js|ts|cjs|mjs)$/, '');
+  const signal = envBrand || stripped;
+  if (signal === 'bematist') {
+    return {
+      name: 'Bematist',
+      host: 'bematist.dev',
+      url: 'https://bematist.dev',
+      apiUrl: 'https://bematist.dev/api',
+    };
+  }
+  return {
+    name: 'Pellametric',
+    host: 'pellametric.com',
+    url: 'https://pellametric.com',
+    apiUrl: 'https://pellametric.com/api',
+  };
+}
+
+const BRAND = detectBrand();
+const DEFAULT_API_URL = process.env.GRAMMATA_API_URL || BRAND.apiUrl;
 
 async function cmdSubmit(token: string | undefined): Promise<void> {
   const apiUrl = getFlag('api-url') || DEFAULT_API_URL;
@@ -1596,7 +1622,7 @@ async function cmdSubmit(token: string | undefined): Promise<void> {
       '  \x1B[31m\u2717\x1B[0m  Missing token.',
     );
     console.log(
-      '     Generate a token at \x1B[36mhttps://bematist.dev\x1B[0m',
+      `     Generate a token at \x1B[36m${BRAND.url}\x1B[0m`,
     );
     console.log('     Then run: \x1B[36mnpx grammata <token>\x1B[0m');
     console.log('');
@@ -1638,7 +1664,7 @@ async function cmdSubmit(token: string | undefined): Promise<void> {
       console.log(`     \x1B[36m${data.cardUrl}\x1B[0m`);
       console.log('');
       console.log(
-        '     Follow \x1B[36mhttps://x.com/bematist_dev\x1B[0m for updates',
+        '     Follow \x1B[36mhttps://x.com/pellametric\x1B[0m for updates',
       );
       console.log('');
 
@@ -1667,7 +1693,7 @@ async function cmdSubmit(token: string | undefined): Promise<void> {
         `  \x1B[31m\u2717\x1B[0m  Invalid or expired token. (${body})`,
       );
       console.log(
-        '     Generate a new one at \x1B[36mhttps://bematist.dev\x1B[0m',
+        `     Generate a new one at \x1B[36m${BRAND.url}\x1B[0m`,
       );
       console.log('');
       process.exit(1);
